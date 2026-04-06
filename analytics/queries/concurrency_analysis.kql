@@ -1,0 +1,8 @@
+// Concurrency Analysis — concurrent activity executions over time by app
+// Estimates concurrency from activity completion counts per time bucket
+customMetrics
+| where name == "df.activity.completed"
+| extend app_name = tostring(customDimensions.app_name)
+| where isnotempty(app_name)
+| summarize ConcurrentActivities = sum(value) by app_name, bin(timestamp, 10s)
+| order by timestamp asc, app_name asc

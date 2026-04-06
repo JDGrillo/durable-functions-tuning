@@ -1,0 +1,31 @@
+{
+    "orderId": "ORD-2026-04-001",
+    "customer": {
+        "name": "Contoso Ltd",
+        "region": "westus",
+        "tier": "premium"
+    },
+    "items": [
+        {
+            "sku": "WIDGET-A",
+            "quantity": 50,
+            "unitPrice": 12.99
+        },
+        {
+            "sku": "WIDGET-B",
+            "quantity": 25,
+            "unitPrice": 24.50
+        },
+        {
+            "sku": "GADGET-X",
+            "quantity": 10,
+            "unitPrice": 99.95
+        }
+    ],
+    "shipping": {
+        "method": "express",
+        "address": "1 Microsoft Way, Redmond WA 98052"
+    },
+    "createdAt": "2026-04-01T12:00:00Z",
+    "notes": "Test payload for Durable Function config comparison"
+}

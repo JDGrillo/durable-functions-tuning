@@ -1,0 +1,49 @@
+// Full Durable Function Operation Trace — every event for a single instance.
+// Shows the complete lifecycle: HTTP trigger → orchestrator replays → activity
+// executions → completion, with timestamps for each step.
+//
+// Replace INSTANCE_ID with a real instance ID from your results.
+// You can get one from the per_instance_execution_timeline query.
+let target_instance_id = "INSTANCE_ID";
+// ─── 1. HTTP trigger that started the orchestration ──────────────────────
+let http_trigger =
+    requests
+    | where name == "httpStart" or name has "orchestrators"
+    | where customDimensions has target_instance_id
+       or operation_Id in (
+           (traces | where message has target_instance_id | distinct operation_Id)
+       )
+    | project event = "HTTP Trigger", timestamp, duration_ms = duration/1ms,
+        operation_Id, name, customDimensions;
+// ─── 2. All orchestrator and activity function invocations ───────────────
+// The requests table has one row per function execution including replays.
+let function_invocations =
+    requests
+    | where customDimensions has target_instance_id
+       or operation_Id in (
+           (traces | where message has target_instance_id | distinct operation_Id)
+       )
+    | where name has "activity" or name has "orchestrat"
+    | project event = strcat("Invocation: ", name), timestamp, duration_ms = duration/1ms,
+        operation_Id, name,
+        success = tostring(success),
+        customDimensions;
+// ─── 3. Durable Task Framework internal logs ─────────────────────────────
+// These explain what happens in the gaps: queue dispatch, replay, scheduling.
+let dtfx_logs =
+    traces
+    | where message has target_instance_id
+    | project event = "DTFX Log", timestamp, duration_ms = 0.0,
+        operation_Id, name = message,
+        customDimensions;
+// ─── 4. Custom OTel spans (your instrumentation) ─────────────────────────
+let custom_spans =
+    dependencies
+    | where customDimensions["df.orchestration_instance_id"] == target_instance_id
+    | project event = strcat("Span: ", name), timestamp, duration_ms = duration/1ms,
+        operation_Id, name,
+        customDimensions;
+// ─── Union everything and sort by time ───────────────────────────────────
+union http_trigger, function_invocations, dtfx_logs, custom_spans
+| order by timestamp asc
+| project timestamp, event, duration_ms, operation_Id, name, customDimensions

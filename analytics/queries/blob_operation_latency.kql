@@ -1,0 +1,20 @@
+// Blob Operation Latency — activity duration by operation type and app
+// Uses the df.activity.duration custom metric with operation_type dimension
+customMetrics
+| where name == "df.activity.duration"
+| extend
+    app_name = tostring(customDimensions.app_name),
+    activity_name = tostring(customDimensions.activity_name)
+| where isnotempty(app_name) and isnotempty(activity_name)
+| extend operation_type = case(
+    activity_name == "activity1BlobRead", "read",
+    activity_name == "activity2BlobTransform", "transform",
+    activity_name == "activity3BlobWrite", "write",
+    "unknown")
+| summarize
+    P50 = percentile(value, 50),
+    P95 = percentile(value, 95),
+    Avg = round(avg(value), 2),
+    Count = count()
+  by app_name, operation_type, bin(timestamp, 1m)
+| order by timestamp asc, app_name asc, operation_type asc

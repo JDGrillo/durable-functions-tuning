@@ -1,0 +1,42 @@
+// Orchestration-to-First-Activity Latency — time between orchestration start
+// and first activity execution, by function app.
+// Uses existing OTel spans in the dependencies table (no code changes needed).
+// Helps diagnose: queue polling delays, cold starts, worker contention.
+//
+// The gap includes: orchestrator code before callActivity(), Durable Task
+// control-queue dispatch, and worker message pickup / cold start time.
+//
+// NOTE: The orchestration span is emitted at completion time (due to replay).
+// We derive the true start by subtracting df.orchestration_duration_ms.
+let orch_spans =
+    dependencies
+    | where name startswith "orchestration:"
+    | extend
+        app_name = tostring(customDimensions["df.app_name"]),
+        instance_id = tostring(customDimensions["df.orchestration_instance_id"]),
+        orch_duration_ms = todouble(customDimensions["df.orchestration_duration_ms"])
+    | where isnotempty(instance_id) and isnotnull(orch_duration_ms)
+    | summarize arg_max(timestamp, *) by instance_id
+    | extend orch_start = datetime_add("millisecond", -tolong(orch_duration_ms), timestamp)
+    | project instance_id, app_name, orch_start;
+let first_activity =
+    dependencies
+    | where name startswith "activity:"
+    | extend
+        instance_id = tostring(customDimensions["df.orchestration_instance_id"]),
+        activity_name = tostring(customDimensions["df.activity_name"])
+    | where isnotempty(instance_id)
+    | summarize first_activity_start = min(timestamp), first_activity_name = take_any(activity_name)
+      by instance_id;
+orch_spans
+| join kind=inner first_activity on instance_id
+| extend gap_ms = datetime_diff("millisecond", first_activity_start, orch_start)
+| summarize
+    AvgGapMs   = round(avg(gap_ms), 2),
+    P50GapMs   = round(percentile(gap_ms, 50), 2),
+    P95GapMs   = round(percentile(gap_ms, 95), 2),
+    P99GapMs   = round(percentile(gap_ms, 99), 2),
+    MaxGapMs   = max(gap_ms),
+    Count      = count()
+  by app_name
+| order by app_name asc

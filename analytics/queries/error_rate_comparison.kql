@@ -1,0 +1,16 @@
+// Error Rate Comparison — failure count and rate by app and activity
+let orchestration_failures = customMetrics
+| where name == "df.orchestration.failed"
+| extend app_name = tostring(customDimensions.app_name)
+| summarize OrcFailures = sum(value) by app_name, bin(timestamp, 1m);
+let orchestration_completions = customMetrics
+| where name == "df.orchestration.completed"
+| extend app_name = tostring(customDimensions.app_name)
+| summarize OrcCompletions = sum(value) by app_name, bin(timestamp, 1m);
+orchestration_completions
+| join kind=leftouter orchestration_failures on app_name, timestamp
+| extend
+    FailureRate = iff(OrcCompletions + OrcFailures > 0,
+        round(OrcFailures * 100.0 / (OrcCompletions + OrcFailures), 2), 0.0)
+| project timestamp, app_name, OrcCompletions, OrcFailures, FailureRate
+| order by timestamp asc, app_name asc

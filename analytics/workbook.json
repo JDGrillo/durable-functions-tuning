@@ -1,0 +1,361 @@
+{
+    "version": "Notebook/1.0",
+    "isLocked": true,
+    "items": [
+        {
+            "type": 9,
+            "content": {
+                "version": "KqlParameterItem/1.0",
+                "parameters": [
+                    {
+                        "id": "time-range",
+                        "version": "KqlParameterItem/1.0",
+                        "name": "TimeRange",
+                        "type": 4,
+                        "isRequired": true,
+                        "typeSettings": {
+                            "selectableValues": [
+                                {
+                                    "durationMs": 300000
+                                },
+                                {
+                                    "durationMs": 900000
+                                },
+                                {
+                                    "durationMs": 1800000
+                                },
+                                {
+                                    "durationMs": 3600000,
+                                    "isInitialTime": true
+                                },
+                                {
+                                    "durationMs": 14400000
+                                },
+                                {
+                                    "durationMs": 43200000
+                                },
+                                {
+                                    "durationMs": 86400000
+                                },
+                                {
+                                    "durationMs": 259200000
+                                }
+                            ]
+                        },
+                        "label": "Time Range"
+                    },
+                    {
+                        "id": "app-filter",
+                        "version": "KqlParameterItem/1.0",
+                        "name": "AppFilter",
+                        "type": 2,
+                        "isRequired": false,
+                        "multiSelect": true,
+                        "quote": "'",
+                        "delimiter": ",",
+                        "query": "customMetrics | where name startswith 'df.' | extend app_name = tostring(customDimensions.app_name) | distinct app_name | order by app_name asc",
+                        "queryType": 0,
+                        "resourceType": "microsoft.insights/components",
+                        "typeSettings": {
+                            "additionalResourceOptions": [
+                                "value::all"
+                            ],
+                            "selectAllValue": "*"
+                        },
+                        "defaultValue": "value::all",
+                        "label": "App"
+                    }
+                ],
+                "style": "pills",
+                "queryType": 0,
+                "resourceType": "microsoft.insights/components"
+            },
+            "name": "parameters"
+        },
+        {
+            "type": 11,
+            "content": {
+                "version": "LinkItem/1.0",
+                "style": "tabs",
+                "links": [
+                    {
+                        "id": "tab-summary",
+                        "cellValue": "tab",
+                        "linkTarget": "parameter",
+                        "linkLabel": "Executive Summary",
+                        "subTarget": "summary",
+                        "style": "link"
+                    },
+                    {
+                        "id": "tab-duration",
+                        "cellValue": "tab",
+                        "linkTarget": "parameter",
+                        "linkLabel": "Duration Analysis",
+                        "subTarget": "duration",
+                        "style": "link"
+                    },
+                    {
+                        "id": "tab-queue",
+                        "cellValue": "tab",
+                        "linkTarget": "parameter",
+                        "linkLabel": "Queue & Scaling",
+                        "subTarget": "queue",
+                        "style": "link"
+                    },
+                    {
+                        "id": "tab-throughput",
+                        "cellValue": "tab",
+                        "linkTarget": "parameter",
+                        "linkLabel": "Throughput & Errors",
+                        "subTarget": "throughput",
+                        "style": "link"
+                    }
+                ]
+            },
+            "name": "tabs"
+        },
+        {
+            "type": 12,
+            "content": {
+                "version": "NotebookGroup/1.0",
+                "groupType": "editable",
+                "items": [
+                    {
+                        "type": 1,
+                        "content": {
+                            "json": "## Executive Summary\nKey performance metrics side-by-side for **baseline** vs **tuned** Durable Function apps."
+                        },
+                        "name": "summary-header"
+                    },
+                    {
+                        "type": 3,
+                        "content": {
+                            "version": "KqlItem/1.0",
+                            "query": "customMetrics\n| where name == 'df.orchestration.duration'\n| extend app_name = tostring(customDimensions.app_name)\n| where '{AppFilter}' == '*' or app_name in ({AppFilter})\n| summarize P50=percentile(value, 50), P95=percentile(value, 95), P99=percentile(value, 99), Avg=round(avg(value), 2), Total=count() by app_name\n| order by app_name asc",
+                            "size": 1,
+                            "title": "Orchestration Duration Summary (ms)",
+                            "timeContextFromParameter": "TimeRange",
+                            "queryType": 0,
+                            "resourceType": "microsoft.insights/components",
+                            "visualization": "table",
+                            "gridSettings": {
+                                "sortBy": [
+                                    {
+                                        "itemKey": "app_name",
+                                        "sortOrder": 1
+                                    }
+                                ]
+                            }
+                        },
+                        "name": "summary-orch-duration-table"
+                    },
+                    {
+                        "type": 3,
+                        "content": {
+                            "version": "KqlItem/1.0",
+                            "query": "customMetrics\n| where name in ('df.orchestration.completed', 'df.orchestration.failed')\n| extend app_name = tostring(customDimensions.app_name)\n| where '{AppFilter}' == '*' or app_name in ({AppFilter})\n| summarize Total=sum(value) by app_name, name\n| pivot name, sum(Total)\n| extend FailRate = round(iff(['df.orchestration.completed'] + ['df.orchestration.failed'] > 0, ['df.orchestration.failed'] * 100.0 / (['df.orchestration.completed'] + ['df.orchestration.failed']), 0.0), 2)",
+                            "size": 1,
+                            "title": "Orchestration Completion & Error Summary",
+                            "timeContextFromParameter": "TimeRange",
+                            "queryType": 0,
+                            "resourceType": "microsoft.insights/components",
+                            "visualization": "table"
+                        },
+                        "name": "summary-completion-table"
+                    },
+                    {
+                        "type": 3,
+                        "content": {
+                            "version": "KqlItem/1.0",
+                            "query": "customMetrics\n| where name == 'df.activity.queue_delay'\n| extend app_name = tostring(customDimensions.app_name)\n| where '{AppFilter}' == '*' or app_name in ({AppFilter})\n| summarize P50=percentile(value, 50), P95=percentile(value, 95), Avg=round(avg(value), 2) by app_name",
+                            "size": 1,
+                            "title": "Queue Delay Summary (ms)",
+                            "timeContextFromParameter": "TimeRange",
+                            "queryType": 0,
+                            "resourceType": "microsoft.insights/components",
+                            "visualization": "table"
+                        },
+                        "name": "summary-queue-delay-table"
+                    }
+                ]
+            },
+            "conditionalVisibility": {
+                "parameterName": "tab",
+                "comparison": "isEqualTo",
+                "value": "summary"
+            },
+            "name": "group-summary"
+        },
+        {
+            "type": 12,
+            "content": {
+                "version": "NotebookGroup/1.0",
+                "groupType": "editable",
+                "items": [
+                    {
+                        "type": 1,
+                        "content": {
+                            "json": "## Duration Analysis\nOrchestration and activity function execution times."
+                        },
+                        "name": "duration-header"
+                    },
+                    {
+                        "type": 3,
+                        "content": {
+                            "version": "KqlItem/1.0",
+                            "query": "customMetrics\n| where name == 'df.orchestration.duration'\n| extend app_name = tostring(customDimensions.app_name)\n| where '{AppFilter}' == '*' or app_name in ({AppFilter})\n| summarize P50=percentile(value, 50), P95=percentile(value, 95) by app_name, bin(timestamp, 1m)\n| order by timestamp asc",
+                            "size": 0,
+                            "title": "Orchestration Duration Over Time (P50 & P95)",
+                            "timeContextFromParameter": "TimeRange",
+                            "queryType": 0,
+                            "resourceType": "microsoft.insights/components",
+                            "visualization": "timechart"
+                        },
+                        "name": "duration-orch-timechart"
+                    },
+                    {
+                        "type": 3,
+                        "content": {
+                            "version": "KqlItem/1.0",
+                            "query": "customMetrics\n| where name == 'df.activity.duration'\n| extend app_name = tostring(customDimensions.app_name), activity_name = tostring(customDimensions.activity_name)\n| where '{AppFilter}' == '*' or app_name in ({AppFilter})\n| summarize P50=percentile(value, 50), P95=percentile(value, 95), Avg=round(avg(value), 2), Count=count() by app_name, activity_name\n| order by app_name asc, activity_name asc",
+                            "size": 1,
+                            "title": "Activity Duration by App & Activity",
+                            "timeContextFromParameter": "TimeRange",
+                            "queryType": 0,
+                            "resourceType": "microsoft.insights/components",
+                            "visualization": "table"
+                        },
+                        "name": "duration-activity-table"
+                    },
+                    {
+                        "type": 3,
+                        "content": {
+                            "version": "KqlItem/1.0",
+                            "query": "customMetrics\n| where name == 'df.activity.duration'\n| extend app_name = tostring(customDimensions.app_name), activity_name = tostring(customDimensions.activity_name)\n| where '{AppFilter}' == '*' or app_name in ({AppFilter})\n| summarize Avg=avg(value) by app_name, activity_name, bin(timestamp, 1m)",
+                            "size": 0,
+                            "title": "Activity Duration Over Time",
+                            "timeContextFromParameter": "TimeRange",
+                            "queryType": 0,
+                            "resourceType": "microsoft.insights/components",
+                            "visualization": "timechart"
+                        },
+                        "name": "duration-activity-timechart"
+                    }
+                ]
+            },
+            "conditionalVisibility": {
+                "parameterName": "tab",
+                "comparison": "isEqualTo",
+                "value": "duration"
+            },
+            "name": "group-duration"
+        },
+        {
+            "type": 12,
+            "content": {
+                "version": "NotebookGroup/1.0",
+                "groupType": "editable",
+                "items": [
+                    {
+                        "type": 1,
+                        "content": {
+                            "json": "## Queue & Scaling\nActivity queue delays and instance scaling behavior."
+                        },
+                        "name": "queue-header"
+                    },
+                    {
+                        "type": 3,
+                        "content": {
+                            "version": "KqlItem/1.0",
+                            "query": "customMetrics\n| where name == 'df.activity.queue_delay'\n| extend app_name = tostring(customDimensions.app_name)\n| where '{AppFilter}' == '*' or app_name in ({AppFilter})\n| summarize P50=percentile(value, 50), P95=percentile(value, 95), Max=max(value) by app_name, bin(timestamp, 1m)",
+                            "size": 0,
+                            "title": "Queue Delay Over Time (ms)",
+                            "timeContextFromParameter": "TimeRange",
+                            "queryType": 0,
+                            "resourceType": "microsoft.insights/components",
+                            "visualization": "timechart"
+                        },
+                        "name": "queue-delay-timechart"
+                    },
+                    {
+                        "type": 3,
+                        "content": {
+                            "version": "KqlItem/1.0",
+                            "query": "performanceCounters\n| extend app_name = cloud_RoleName\n| where app_name in ('baseline', 'tuned')\n| summarize InstanceCount=dcount(cloud_RoleInstance) by app_name, bin(timestamp, 1m)\n| order by timestamp asc",
+                            "size": 0,
+                            "title": "Instance Count Over Time",
+                            "timeContextFromParameter": "TimeRange",
+                            "queryType": 0,
+                            "resourceType": "microsoft.insights/components",
+                            "visualization": "timechart"
+                        },
+                        "name": "scaling-timechart"
+                    }
+                ]
+            },
+            "conditionalVisibility": {
+                "parameterName": "tab",
+                "comparison": "isEqualTo",
+                "value": "queue"
+            },
+            "name": "group-queue"
+        },
+        {
+            "type": 12,
+            "content": {
+                "version": "NotebookGroup/1.0",
+                "groupType": "editable",
+                "items": [
+                    {
+                        "type": 1,
+                        "content": {
+                            "json": "## Throughput & Errors\nOrchestration completion rates and failure tracking."
+                        },
+                        "name": "throughput-header"
+                    },
+                    {
+                        "type": 3,
+                        "content": {
+                            "version": "KqlItem/1.0",
+                            "query": "customMetrics\n| where name == 'df.orchestration.completed'\n| extend app_name = tostring(customDimensions.app_name)\n| where '{AppFilter}' == '*' or app_name in ({AppFilter})\n| summarize Completions=sum(value) by app_name, bin(timestamp, 1m)",
+                            "size": 0,
+                            "title": "Orchestrations Completed per Minute",
+                            "timeContextFromParameter": "TimeRange",
+                            "queryType": 0,
+                            "resourceType": "microsoft.insights/components",
+                            "visualization": "timechart"
+                        },
+                        "name": "throughput-timechart"
+                    },
+                    {
+                        "type": 3,
+                        "content": {
+                            "version": "KqlItem/1.0",
+                            "query": "let failures = customMetrics\n| where name == 'df.orchestration.failed'\n| extend app_name = tostring(customDimensions.app_name)\n| where '{AppFilter}' == '*' or app_name in ({AppFilter})\n| summarize Failures=sum(value) by app_name, bin(timestamp, 1m);\nlet completions = customMetrics\n| where name == 'df.orchestration.completed'\n| extend app_name = tostring(customDimensions.app_name)\n| where '{AppFilter}' == '*' or app_name in ({AppFilter})\n| summarize Completions=sum(value) by app_name, bin(timestamp, 1m);\ncompletions\n| join kind=leftouter failures on app_name, timestamp\n| extend FailRate = round(iff(Completions + Failures > 0, Failures * 100.0 / (Completions + Failures), 0.0), 2)\n| project timestamp, app_name, Completions, Failures, FailRate",
+                            "size": 0,
+                            "title": "Error Rate Over Time (%)",
+                            "timeContextFromParameter": "TimeRange",
+                            "queryType": 0,
+                            "resourceType": "microsoft.insights/components",
+                            "visualization": "timechart",
+                            "chartSettings": {
+                                "yAxis": [
+                                    "FailRate"
+                                ]
+                            }
+                        },
+                        "name": "error-rate-timechart"
+                    }
+                ]
+            },
+            "conditionalVisibility": {
+                "parameterName": "tab",
+                "comparison": "isEqualTo",
+                "value": "throughput"
+            },
+            "name": "group-throughput"
+        }
+    ],
+    "fallbackResourceIds": [],
+    "$schema": "https://github.com/Microsoft/Application-Insights-Workbooks/blob/master/schema/workbook.json"
+}

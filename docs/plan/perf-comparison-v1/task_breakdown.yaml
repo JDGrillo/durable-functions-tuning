@@ -1,0 +1,744 @@
+plan_id: perf-comparison-v1
+objective: |
+  Compare performance of two identical Azure Durable Function apps (Node.js 20, v4 programming model)
+  with different host.json and scaling configurations. Both apps use Azure Storage provider, run on
+  Elastic Premium EP3 plans, perform Blob Storage I/O in 3 sequential activities, and emit custom
+  OpenTelemetry traces to a shared Application Insights instance. Include Terraform infrastructure,
+  Azure Load Testing, and KQL analytics for side-by-side comparison.
+created_at: "2026-04-01"
+created_by: requirements-planner
+status: completed
+research_confidence: high
+
+tldr: |
+  Monorepo with two Durable Function apps (baseline vs tuned) sharing identical orchestration logic
+  (3 sequential Blob Storage I/O activities). Custom OpenTelemetry spans/metrics on every function.
+  Terraform provisions EP3 plans, shared App Insights, Blob Storage, and Azure Load Testing.
+  KQL queries and a workbook enable side-by-side performance comparison.
+
+requirements_summary: |
+  1. Two Azure Durable Function apps (Node.js 20, Azure Functions v4 programming model)
+  2. Azure Storage provider for durable task hub (each app uses its own task hub)
+  3. Each app: 1 HTTP-triggered starter, 1 orchestrator, 3 sequential activity functions
+  4. Activity logic: Azure Blob Storage read/write operations (I/O-bound)
+  5. Business logic is identical between both apps — shared as a common package
+  6. App "baseline": default host.json, default app settings, default scaling
+  7. App "tuned": optimized host.json (concurrency, partitions, queue batch size),
+     tuned app settings (FUNCTIONS_WORKER_PROCESS_COUNT, node options),
+     Elastic Premium scaling config (max burst, always-ready instances)
+  8. Custom telemetry: OpenTelemetry custom spans + metrics + correlation IDs on
+     orchestrator and all activities, sent to shared Application Insights
+  9. Both apps on Elastic Premium EP3 (4 vCPU, 14 GB)
+  10. Terraform for all Azure infrastructure
+  11. Azure Load Testing resource + JMeter test plan for concurrent orchestration triggering
+  12. Manual HTTP trigger endpoint for ad-hoc testing
+  13. KQL queries + Azure Monitor Workbook for comparing execution times, delays, throughput
+  14. No CI/CD pipelines in scope
+
+open_questions: []
+
+risk_assessment:
+  overall_risk_level: medium
+  critical_risks:
+    - scenario: Durable Functions v4 + OpenTelemetry integration has breaking changes or limited docs
+      likelihood: medium
+      impact: medium
+      mitigation: Research current SDK state early (Task 1); fall back to applicationinsights SDK direct if needed
+    - scenario: Tuned host.json parameters cause instability under high load
+      likelihood: low
+      impact: high
+      mitigation: Start with documented recommended values; load test incrementally
+    - scenario: Shared App Insights instance creates noisy data making comparison difficult
+      likelihood: medium
+      impact: medium
+      mitigation: Use cloud_RoleName and custom dimensions to distinguish apps in all telemetry; validate with KQL early
+    - scenario: Azure Load Testing quotas or regional limits delay testing
+      likelihood: low
+      impact: medium
+      mitigation: Provision in a region with ALT availability; have manual trigger as fallback
+  assumptions:
+    - User has an Azure subscription with permissions to create EP3 plans and Azure Load Testing
+    - Azure Blob Storage latency is representative enough to surface configuration differences
+    - Node.js 20 LTS is the target runtime through the project lifecycle
+    - TypeScript will be used (standard for v4 programming model)
+  constraints:
+    - Both function apps must have byte-identical business logic (enforced via shared package)
+    - Only the configuration layer differs between baseline and tuned apps
+    - EP3 SKU is fixed — no SKU comparison in scope
+    - No CI/CD pipelines in initial scope
+
+implementation_specification:
+  code_structure: |
+    Monorepo using npm workspaces. Shared package contains all business logic (activities,
+    orchestrator, telemetry helpers). Each function app is a thin wrapper that imports from
+    shared and provides its own host.json + local.settings.json.
+  affected_areas:
+    - apps/baseline/ — baseline function app with default configuration
+    - apps/tuned/ — tuned function app with optimized configuration
+    - packages/shared/ — shared orchestrator, activities, and telemetry instrumentation
+    - infra/ — Terraform modules for all Azure resources
+    - loadtest/ — Azure Load Testing JMeter plan and configuration
+    - analytics/ — KQL queries and workbook JSON template
+  component_details:
+    - component: packages/shared
+      responsibility: |
+        Contains all business logic (3 activity functions + orchestrator) and telemetry
+        instrumentation. Both function apps import from this package to guarantee identical logic.
+      interfaces:
+        - "activity1BlobRead(context, input): Promise<ActivityResult>"
+        - "activity2BlobTransform(context, input): Promise<ActivityResult>"
+        - "activity3BlobWrite(context, input): Promise<ActivityResult>"
+        - "orchestrator(context): Generator"
+        - "createTelemetryHelper(appName): TelemetryHelper"
+    - component: apps/baseline
+      responsibility: |
+        Azure Functions v4 app with default host.json. Registers orchestrator and activities
+        from shared package. HTTP-triggered starter function.
+      interfaces:
+        - "POST /api/orchestrators/{orchestratorName} — starts orchestration"
+        - "GET /api/orchestrators/{orchestratorName}/{instanceId} — status query"
+    - component: apps/tuned
+      responsibility: |
+        Azure Functions v4 app with optimized host.json, tuned app settings, and EP3
+        scaling configuration. Same function registrations as baseline.
+      interfaces:
+        - "POST /api/orchestrators/{orchestratorName} — starts orchestration"
+        - "GET /api/orchestrators/{orchestratorName}/{instanceId} — status query"
+    - component: infra
+      responsibility: |
+        Terraform root module provisioning all Azure resources: 2x EP3 plans, 2x function apps,
+        1x App Insights + Log Analytics workspace, 2x Storage accounts (task hub), 2x Storage
+        accounts (workload blobs, one per app to eliminate I/O contention), 1x Azure Load Testing resource.
+      interfaces:
+        - "terraform apply — provisions all resources"
+        - "outputs: function_app_urls, app_insights_connection_string, load_test_id"
+    - component: loadtest
+      responsibility: |
+        JMeter test plan (.jmx) for Azure Load Testing. Parameterized to target both function
+        app endpoints. Configurable concurrency, duration, and ramp-up.
+      interfaces:
+        - "loadtest.jmx — JMeter plan for ALT"
+        - "loadtest.config.yaml — ALT configuration file"
+    - component: analytics
+      responsibility: |
+        KQL query library and Azure Monitor Workbook template for side-by-side comparison of
+        execution times, queue delays, activity durations, throughput, and error rates.
+      interfaces:
+        - "queries/*.kql — individual KQL queries"
+        - "workbook.json — ARM/Bicep-deployable workbook template"
+  dependencies:
+    - component: apps/baseline
+      relationship: imports business logic and telemetry from packages/shared
+    - component: apps/tuned
+      relationship: imports business logic and telemetry from packages/shared
+    - component: loadtest
+      relationship: targets HTTP endpoints from apps/baseline and apps/tuned
+    - component: analytics
+      relationship: queries telemetry schema defined in packages/shared telemetry helpers
+  integration_points:
+    - Both function apps → shared Application Insights instance (via connection string)
+    - Baseline activity functions → baseline Blob Storage account (workload I/O)
+    - Tuned activity functions → tuned Blob Storage account (workload I/O)
+    - Durable orchestrator → per-app Azure Storage (task hub queues and tables)
+    - Azure Load Testing → function app HTTP endpoints
+    - KQL workbook → Application Insights / Log Analytics workspace
+
+task_relationships:
+  - task: T1
+    depends_on: []
+    provides_to: [T3, T4, T6, T7]
+    interface: Research findings on DF v4 telemetry patterns, host.json tuning parameters, OpenTelemetry SDK integration
+    format: research_findings YAML
+  - task: T2
+    depends_on: []
+    provides_to: [T3, T4, T5, T6]
+    interface: Monorepo scaffolding with npm workspaces, tsconfig, shared package skeleton
+    format: file system structure
+  - task: T3
+    depends_on: [T1, T2]
+    provides_to: [T5, T6]
+    interface: Exported activity and orchestrator functions from packages/shared
+    format: TypeScript modules
+  - task: T4
+    depends_on: [T1, T2]
+    provides_to: [T5, T6, T9]
+    interface: TelemetryHelper class with custom span/metric creation, correlation ID propagation
+    format: TypeScript module + telemetry schema documentation
+  - task: T5
+    depends_on: [T3, T4]
+    provides_to: [T8]
+    interface: Deployable baseline function app with default configuration
+    format: Azure Functions v4 app
+  - task: T6
+    depends_on: [T1, T3, T4]
+    provides_to: [T8]
+    interface: Deployable tuned function app with optimized configuration
+    format: Azure Functions v4 app
+  - task: T7
+    depends_on: [T1]
+    provides_to: [T8, T9]
+    interface: Terraform root module with outputs for all resource endpoints
+    format: Terraform HCL files
+  - task: T8
+    depends_on: [T5, T6, T7]
+    provides_to: []
+    interface: Azure Load Testing JMeter plan and config targeting both function apps
+    format: JMeter .jmx + ALT config YAML
+  - task: T9
+    depends_on: [T4, T7]
+    provides_to: []
+    interface: KQL queries and workbook template for performance comparison
+    format: .kql files + workbook JSON
+  - task: T10
+    depends_on: [T3, T4, T5, T6, T7, T8, T9]
+    provides_to: [T11]
+    interface: Review findings and any required fixes
+    format: Review report
+  - task: T11
+    depends_on: [T10]
+    provides_to: []
+    interface: Project README, setup guide, comparison methodology
+    format: Markdown files
+
+tasks:
+  # ─── RESEARCH ───────────────────────────────────────────────
+  - id: T1
+    title: Research Durable Functions v4 tuning and OpenTelemetry integration
+    description: |
+      Research the following areas and produce a findings document:
+      1. Azure Durable Functions Node.js v4 programming model — current SDK versions,
+         Azure Storage provider configuration options, known limitations
+      2. host.json tuning parameters for durableTask/storageProvider: maxConcurrentActivityFunctions,
+         maxConcurrentOrchestratorFunctions, controlQueueBatchSize, partitionCount,
+         controlQueueBufferThreshold, trackingStoreNamePrefix
+      3. App-level tuning: FUNCTIONS_WORKER_PROCESS_COUNT, NODE_OPTIONS (max-old-space-size),
+         WEBSITE_MAX_DYNAMIC_APPLICATION_SCALE_OUT
+      4. EP3 scaling config: always-ready instances, max burst, pre-warmed instance count
+      5. OpenTelemetry integration with Azure Functions Node.js v4: @opentelemetry/api usage,
+         custom spans on activity/orchestrator functions, metric instruments, correlation ID propagation
+      6. Azure Storage Blob SDK best practices for I/O-bound workloads (connection pooling, retry policies)
+    execution_order: 1
+    agent: gem-researcher
+    priority: high
+    status: completed
+    depends_on: []
+    context_files:
+      - "Microsoft docs: Durable Functions host.json reference": https://learn.microsoft.com/en-us/azure/azure-functions/durable/durable-functions-bindings
+      - "Microsoft docs: Azure Functions Node.js v4": https://learn.microsoft.com/en-us/azure/azure-functions/functions-reference-node
+    estimated_effort: medium
+    estimated_files: 1
+    estimated_lines: 0
+    focus_area: Durable Functions v4 + OpenTelemetry + host.json tuning
+    verification:
+      - Research document covers all 6 areas listed in description
+      - Specific version numbers and SDK package names are identified
+      - Tuning parameter ranges and recommendations are documented
+    acceptance_criteria:
+      - Findings YAML produced with concrete SDK versions, parameter names, and recommended values
+      - OpenTelemetry integration approach validated against current SDK compatibility
+      - Any open questions or risks flagged for planner review
+    failure_modes:
+      - scenario: OpenTelemetry auto-instrumentation conflicts with Durable Functions replay logic
+        likelihood: medium
+        impact: high
+        mitigation: Document workaround using manual spans that check isReplaying flag
+    tech_stack:
+      - durable-functions (npm)
+      - "@azure/functions v4"
+      - "@opentelemetry/api"
+      - "@azure/storage-blob"
+
+  # ─── SCAFFOLD ───────────────────────────────────────────────
+  - id: T2
+    title: Scaffold monorepo structure with npm workspaces
+    description: |
+      Create the monorepo workspace structure:
+      - Root package.json with npm workspaces pointing to apps/* and packages/*
+      - Root tsconfig.json with project references
+      - packages/shared/ — TypeScript package skeleton (package.json, tsconfig.json, src/index.ts)
+      - apps/baseline/ — Azure Functions v4 app skeleton (package.json, tsconfig.json, host.json, local.settings.json.example)
+      - apps/tuned/ — same skeleton as baseline
+      - infra/ — empty Terraform directory structure (main.tf, variables.tf, outputs.tf, providers.tf)
+      - loadtest/ — empty directory for JMeter plan
+      - analytics/ — empty directory for KQL queries
+      - .gitignore, .nvmrc (Node 20), .editorconfig
+    execution_order: 1
+    agent: gem-implementer
+    priority: high
+    status: completed
+    depends_on: []
+    context_files: {}
+    estimated_effort: medium
+    estimated_files: 15
+    estimated_lines: 300
+    focus_area: project scaffolding
+    verification:
+      - npm install succeeds at root level
+      - TypeScript compiles with no errors across all workspaces
+      - apps/baseline and apps/tuned both reference packages/shared
+    acceptance_criteria:
+      - npm workspaces resolve correctly (npm ls shows shared package linked)
+      - tsconfig project references build without errors
+      - Both app skeletons can start locally (even with no functions registered yet)
+    failure_modes:
+      - scenario: npm workspace resolution fails with symlink issues on Windows
+        likelihood: low
+        impact: medium
+        mitigation: Use explicit file references in package.json if workspaces fail
+    tech_stack:
+      - Node.js 20
+      - TypeScript 5.x
+      - npm workspaces
+      - Azure Functions Core Tools v4
+    test_coverage: null
+
+  # ─── SHARED BUSINESS LOGIC ─────────────────────────────────
+  - id: T3
+    title: Implement orchestrator and 3 Blob Storage activity functions
+    description: |
+      In packages/shared, implement:
+      1. activity1BlobRead — reads a blob from a configurable container/path, returns content + metadata
+      2. activity2BlobTransform — receives blob content, performs a transformation (e.g., JSON parse,
+         field mapping, data enrichment), returns transformed result
+      3. activity3BlobWrite — writes the transformed result to an output container/path, returns write confirmation
+      4. orchestrator — calls the 3 activities sequentially, passing output of each as input to the next
+      5. Types/interfaces for activity inputs/outputs
+      All functions must accept configuration (storage connection string, container names) via input parameters.
+      Activities must be pure functions of their inputs (no side effects beyond blob I/O) to ensure
+      identical behavior in both apps.
+    execution_order: 2
+    agent: gem-implementer
+    priority: high
+    status: completed
+    depends_on: [T1, T2]
+    context_files:
+      - "packages/shared/src/index.ts": skeleton from T2
+    estimated_effort: medium
+    estimated_files: 6
+    estimated_lines: 400
+    focus_area: business logic
+    verification:
+      - Unit tests pass for each activity function (mocked Blob Storage)
+      - Orchestrator correctly chains activities sequentially
+      - TypeScript compiles with strict mode
+    acceptance_criteria:
+      - Each activity performs a distinct Blob Storage operation (read, transform, write)
+      - Orchestrator calls all 3 activities in sequence and propagates context
+      - All functions are exported and consumable from both app packages
+      - Error handling follows Azure Functions best practices (retryable vs terminal errors)
+    failure_modes:
+      - scenario: Blob Storage SDK connection pooling causes memory leaks under high concurrency
+        likelihood: low
+        impact: high
+        mitigation: Use singleton BlobServiceClient with connection pooling; document cleanup
+    tech_stack:
+      - "@azure/storage-blob"
+      - durable-functions
+      - "@azure/functions v4"
+      - TypeScript
+    test_coverage: Unit tests with mocked Blob SDK for all 3 activities + orchestrator
+
+  # ─── TELEMETRY INSTRUMENTATION ──────────────────────────────
+  - id: T4
+    title: Implement custom OpenTelemetry instrumentation layer
+    description: |
+      In packages/shared, implement a telemetry module:
+      1. TelemetryHelper class/factory that wraps @opentelemetry/api:
+         - createActivitySpan(activityName, parentContext) — creates a custom span for each activity
+         - recordActivityDuration(activityName, durationMs) — records histogram metric
+         - setCorrelationId(span, orchestrationInstanceId) — attaches correlation dimensions
+         - recordQueueDelay(activityName, scheduledTime, startTime) — measures queue wait time
+      2. Orchestrator instrumentation wrapper:
+         - Creates parent span for entire orchestration
+         - Tracks total orchestration duration
+         - Records number of activities completed
+         - CRITICAL: Must handle Durable Functions replay — only emit telemetry on non-replay executions
+      3. Activity instrumentation wrapper:
+         - Wraps each activity call with start/end spans
+         - Records custom dimensions: appName (baseline|tuned), activityName, orchestrationInstanceId,
+           blobSize, operationType (read|transform|write)
+         - Records timing metrics: execution duration, blob SDK latency
+      4. Configuration: accepts App Insights connection string, app name tag (for cloud_RoleName differentiation)
+    execution_order: 2
+    agent: gem-implementer
+    priority: high
+    status: completed
+    depends_on: [T1, T2]
+    context_files:
+      - "packages/shared/src/index.ts": skeleton from T2
+      - "T1 research findings": OpenTelemetry + DF replay handling approach
+    estimated_effort: large
+    estimated_files: 4
+    estimated_lines: 450
+    focus_area: observability
+    verification:
+      - Custom spans appear in local App Insights emulator or debug logs
+      - Replay detection correctly suppresses duplicate telemetry
+      - cloud_RoleName correctly differentiates baseline vs tuned
+      - Correlation IDs propagate through orchestrator → activity chain
+    acceptance_criteria:
+      - Every function execution produces a custom span with all required dimensions
+      - Histogram metrics recorded for activity duration and queue delay
+      - Replay-safe — no duplicate telemetry from orchestrator replays
+      - cloud_RoleName set per-app for filtering in shared App Insights
+    failure_modes:
+      - scenario: Orchestrator replay causes duplicate spans in App Insights
+        likelihood: high
+        impact: high
+        mitigation: Check context.df.isReplaying before emitting any telemetry; wrap in guard
+      - scenario: OpenTelemetry SDK conflicts with built-in Azure Functions telemetry
+        likelihood: medium
+        impact: medium
+        mitigation: Use manual instrumentation via @opentelemetry/api tracer; avoid auto-instrumentation
+    tech_stack:
+      - "@opentelemetry/api"
+      - "@opentelemetry/sdk-trace-node"
+      - "@opentelemetry/sdk-metrics"
+      - "@azure/monitor-opentelemetry-exporter"
+      - TypeScript
+    test_coverage: Unit tests validating span creation, replay guard, metric recording
+
+  # ─── BASELINE APP ──────────────────────────────────────────
+  - id: T5
+    title: Wire baseline function app with default configuration
+    description: |
+      In apps/baseline/:
+      1. Register orchestrator and all 3 activities from packages/shared using Azure Functions v4 registration
+      2. Create HTTP-triggered starter function (httpStart) that starts the orchestration
+         and returns the standard Durable Functions status URLs
+      3. Initialize telemetry helper with appName="baseline"
+      4. host.json: use default Azure Functions + Durable Functions configuration (no tuning)
+      5. local.settings.json.example: document required app settings
+         (AzureWebJobsStorage, APPLICATIONINSIGHTS_CONNECTION_STRING, BLOB_STORAGE_CONNECTION_STRING)
+      6. Ensure the app starts and runs locally with Azure Functions Core Tools
+    execution_order: 3
+    agent: gem-implementer
+    priority: high
+    status: completed
+    depends_on: [T3, T4]
+    context_files:
+      - "packages/shared/src/": activity and orchestrator implementations
+      - "apps/baseline/host.json": default config
+    estimated_effort: small
+    estimated_files: 4
+    estimated_lines: 150
+    focus_area: app integration
+    verification:
+      - func start runs without errors
+      - HTTP trigger returns orchestration status URLs
+      - Orchestration completes end-to-end locally with Azurite
+      - Custom telemetry appears in console/debug output
+    acceptance_criteria:
+      - All functions registered and discoverable by runtime
+      - host.json contains only default/minimal configuration
+      - HTTP starter returns proper Durable Functions management URLs
+      - App can run locally with Azurite for storage emulation
+    failure_modes:
+      - scenario: Shared package import fails at runtime due to ESM/CJS module resolution
+        likelihood: medium
+        impact: high
+        mitigation: Ensure consistent module format (ESM) across workspace; validate with local run
+    tech_stack:
+      - "@azure/functions v4"
+      - durable-functions
+      - Azure Functions Core Tools
+    test_coverage: Integration test — start orchestration via HTTP, verify completion
+
+  # ─── TUNED APP ──────────────────────────────────────────────
+  - id: T6
+    title: Wire tuned function app with optimized configuration
+    description: |
+      In apps/tuned/:
+      1. Same function registrations as baseline (from packages/shared)
+      2. Initialize telemetry helper with appName="tuned"
+      3. host.json — tuned durableTask section:
+         - maxConcurrentActivityFunctions: increased (e.g., 20+, based on EP3 capacity)
+         - maxConcurrentOrchestratorFunctions: increased
+         - controlQueueBatchSize: increased
+         - partitionCount: optimized for EP3
+         - extendedSessionsEnabled: true
+         - extendedSessionIdleTimeoutInSeconds: tuned
+      4. App settings for tuned deployment:
+         - FUNCTIONS_WORKER_PROCESS_COUNT: >1 if beneficial for Node.js
+         - NODE_OPTIONS: --max-old-space-size appropriate for EP3 14GB
+      5. Elastic Premium scaling config (documented for Terraform):
+         - always_ready_instance_count: set based on expected baseline load
+         - maximum_scale_out_limit: set for burst capacity
+         - pre_warmed_instance_count: configured
+      6. Document each tuning parameter with rationale in comments
+    execution_order: 3
+    agent: gem-implementer
+    priority: high
+    status: completed
+    depends_on: [T1, T3, T4]
+    context_files:
+      - "T1 research findings": tuning parameter recommendations
+      - "apps/baseline/": reference implementation for same structure
+    estimated_effort: medium
+    estimated_files: 4
+    estimated_lines: 200
+    focus_area: performance tuning
+    verification:
+      - func start runs without errors
+      - host.json validates against schema
+      - All tuning parameters are documented with rationale
+      - App runs identically to baseline (same logic, different config)
+    acceptance_criteria:
+      - host.json contains documented tuning parameters with rationale comments
+      - App settings file documents all tuning-related environment variables
+      - Elastic Premium scaling parameters documented for Terraform consumption
+      - App produces same orchestration results as baseline with different performance characteristics
+    failure_modes:
+      - scenario: Over-aggressive concurrency settings cause storage throttling
+        likelihood: medium
+        impact: medium
+        mitigation: Start with moderate increases; include throttling detection in telemetry
+    tech_stack:
+      - "@azure/functions v4"
+      - durable-functions
+      - Azure Functions Core Tools
+    test_coverage: Integration test — same as baseline, validates identical outputs
+
+  # ─── TERRAFORM ──────────────────────────────────────────────
+  - id: T7
+    title: Provision Azure infrastructure with Terraform
+    description: |
+      Create Terraform configuration in infra/ to provision:
+      1. Resource Group
+      2. Log Analytics Workspace
+      3. Application Insights (shared, connected to Log Analytics) with workspace-based mode
+      4. Storage Account — baseline task hub (Tables + Queues for Durable Functions)
+      5. Storage Account — tuned task hub (separate to avoid cross-contamination)
+      6. Storage Account — baseline workload blobs (I/O target for baseline activities)
+      7. Storage Account — tuned workload blobs (I/O target for tuned activities)
+      8. Elastic Premium EP3 App Service Plan — baseline
+      9. Elastic Premium EP3 App Service Plan — tuned
+      10. Function App — baseline (linked to baseline plan, baseline storage accounts, shared App Insights)
+         - Default scaling settings
+      11. Function App — tuned (linked to tuned plan, tuned storage accounts, shared App Insights)
+          - always_ready_instance_count, maximum_scale_out_limit, pre_warmed_instance_count configured
+      12. Azure Load Testing resource
+      12. Variables: resource prefix, location, EP3 config, scaling params
+      13. Outputs: function app URLs, App Insights connection string, storage connection strings, load test resource ID
+      Use azurerm provider. Follow Terraform best practices (modules for reusable components).
+    execution_order: 2
+    agent: gem-implementer
+    priority: high
+    status: completed
+    depends_on: [T1]
+    context_files:
+      - "T1 research findings": EP3 scaling parameters, storage provider requirements
+    estimated_effort: large
+    estimated_files: 8
+    estimated_lines: 500
+    focus_area: infrastructure
+    verification:
+      - terraform validate passes
+      - terraform plan shows expected resources (no errors)
+      - All outputs defined and referenced correctly
+      - Security best practices (no hardcoded secrets, managed identities where possible)
+    acceptance_criteria:
+      - All 12 resources provisionable with terraform apply
+      - Baseline and tuned function apps have fully isolated storage (task hub + workload blobs)
+      - Shared App Insights instance receives telemetry from both apps
+      - EP3 scaling parameters configurable via variables
+      - Azure Load Testing resource provisioned and accessible
+    failure_modes:
+      - scenario: EP3 SKU not available in selected region
+        likelihood: low
+        impact: high
+        mitigation: Default to eastus2; document alternative regions in variables
+      - scenario: Terraform azurerm provider version incompatibility with ALT resource
+        likelihood: low
+        impact: medium
+        mitigation: Pin provider version; verify ALT support in chosen version
+    tech_stack:
+      - Terraform
+      - azurerm provider
+    requires_review: true
+    review_depth: full
+    security_sensitive: true
+
+  # ─── LOAD TESTING ──────────────────────────────────────────
+  - id: T8
+    title: Create Azure Load Testing configuration and JMeter plan
+    description: |
+      In loadtest/:
+      1. JMeter test plan (.jmx) that:
+         - Targets both function app HTTP starter endpoints
+         - Sends POST requests to start orchestrations
+         - Configurable: number of threads (concurrent users), ramp-up period, duration
+         - Parameterized: target URLs, request body (blob paths, etc.)
+         - Records response times for orchestration start
+      2. Azure Load Testing config file (loadtest.config.yaml):
+         - References the JMeter plan
+         - Defines test parameters (URLs injected from Terraform outputs)
+         - Engine instance count for distributed load
+      3. Helper script or documentation for:
+         - Uploading test plan to Azure Load Testing
+         - Running tests via Azure CLI
+         - Manual HTTP trigger examples (curl/PowerShell) for ad-hoc testing
+      4. Seed data script: creates identical test blobs in both workload storage accounts
+    execution_order: 4
+    agent: gem-implementer
+    priority: medium
+    status: completed
+    depends_on: [T5, T6, T7]
+    context_files:
+      - "apps/baseline/src/functions/httpStart.ts": HTTP trigger contract
+      - "infra/outputs.tf": Terraform outputs for URLs
+    estimated_effort: medium
+    estimated_files: 4
+    estimated_lines: 300
+    focus_area: load testing
+    verification:
+      - JMeter plan opens and validates in JMeter GUI
+      - Manual curl/PowerShell commands successfully start orchestrations
+      - Seed data script creates expected blobs
+    acceptance_criteria:
+      - JMeter plan targets both function apps with parameterized URLs
+      - Load test configurable for different concurrency levels
+      - Manual testing documented with example commands
+      - Seed data script populates workload storage with test blobs
+    failure_modes:
+      - scenario: JMeter thread groups overwhelm function apps before scaling kicks in
+        likelihood: medium
+        impact: medium
+        mitigation: Use ramp-up period; start with low concurrency and increase gradually
+    tech_stack:
+      - Apache JMeter
+      - Azure Load Testing
+      - Azure CLI
+    test_coverage: null
+
+  # ─── ANALYTICS ──────────────────────────────────────────────
+  - id: T9
+    title: Build KQL queries and Azure Monitor Workbook for comparison
+    description: |
+      In analytics/:
+      1. KQL queries (individual .kql files):
+         - orchestration_duration_comparison.kql: P50/P95/P99 orchestration duration by app
+         - activity_duration_breakdown.kql: duration per activity by app
+         - queue_delay_analysis.kql: time between activity scheduled and activity started, by app
+         - throughput_comparison.kql: orchestrations completed per minute by app
+         - error_rate_comparison.kql: failure rates by app and activity
+         - concurrency_analysis.kql: concurrent executions over time by app
+         - blob_operation_latency.kql: blob SDK call latency by operation type and app
+         - scaling_events.kql: instance count changes over time by app
+      2. Azure Monitor Workbook template (JSON):
+         - Tab 1: Executive Summary — key metrics side-by-side
+         - Tab 2: Duration Analysis — orchestration and activity duration charts
+         - Tab 3: Queue & Scaling — queue delays and instance scaling
+         - Tab 4: Throughput & Errors — completions/min and error rates
+         - Parameterized: time range, app filter
+         - Deployable via Terraform or ARM
+    execution_order: 4
+    agent: gem-implementer
+    priority: medium
+    status: completed
+    depends_on: [T4, T7]
+    context_files:
+      - "packages/shared/src/telemetry/": custom dimension names and metric names
+      - "infra/": App Insights resource ID for workbook scope
+    estimated_effort: medium
+    estimated_files: 10
+    estimated_lines: 400
+    focus_area: analytics and visualization
+    verification:
+      - KQL queries parse without syntax errors in Log Analytics
+      - Workbook template validates as valid ARM/JSON
+      - Queries return meaningful results when test telemetry exists
+    acceptance_criteria:
+      - All 8 KQL queries produce side-by-side comparison data using cloud_RoleName filter
+      - Workbook template deployable and functional with parameterized time range
+      - Queries use correct custom dimension and metric names from telemetry module
+    failure_modes:
+      - scenario: Custom telemetry dimensions not indexed or queryable in App Insights
+        likelihood: low
+        impact: high
+        mitigation: Use customDimensions bag with well-known keys; validate with early test data
+    tech_stack:
+      - KQL (Kusto Query Language)
+      - Azure Monitor Workbooks
+      - JSON/ARM templates
+
+  # ─── REVIEW ─────────────────────────────────────────────────
+  - id: T10
+    title: Full code and configuration review
+    description: |
+      Review all deliverables for:
+      1. Code quality: TypeScript strict mode compliance, error handling, no leaked credentials
+      2. Configuration correctness: host.json schema validity, tuning parameter values justified
+      3. Telemetry completeness: all custom spans/metrics present, replay guard implemented
+      4. Terraform security: no hardcoded secrets, managed identities, network restrictions
+      5. Logic parity: verify baseline and tuned apps have identical business logic
+      6. Load test safety: ensure test plan has reasonable limits and ramp-up
+    execution_order: 5
+    agent: gem-reviewer
+    priority: high
+    status: completed
+    depends_on: [T3, T4, T5, T6, T7, T8, T9]
+    context_files:
+      - "apps/": both function apps
+      - "packages/shared/": shared logic and telemetry
+      - "infra/": Terraform configuration
+      - "loadtest/": JMeter plan
+      - "analytics/": KQL queries
+    estimated_effort: medium
+    estimated_files: 0
+    estimated_lines: 0
+    focus_area: quality assurance
+    verification:
+      - All review findings addressed or documented as accepted risks
+    acceptance_criteria:
+      - No security vulnerabilities in Terraform or application code
+      - Business logic verified identical between both apps
+      - All telemetry instrumentation complete and replay-safe
+      - host.json tuning parameters validated against documentation
+    failure_modes:
+      - scenario: Review finds logic divergence between baseline and tuned apps
+        likelihood: low
+        impact: high
+        mitigation: Shared package architecture should prevent this; verify import paths
+    requires_review: true
+    review_depth: full
+    security_sensitive: true
+
+  # ─── DOCUMENTATION ─────────────────────────────────────────
+  - id: T11
+    title: Write project documentation and comparison guide
+    description: |
+      Create documentation:
+      1. README.md — project overview, architecture diagram (Mermaid), prerequisites, quick start
+      2. docs/setup-guide.md — step-by-step: Terraform apply, seed data, deploy functions, run tests
+      3. docs/comparison-methodology.md — what is being compared, how to interpret results,
+         statistical considerations (warm-up period, steady state, sample size)
+      4. docs/tuning-reference.md — all tuning parameters used in the tuned app with explanations
+      5. docs/telemetry-schema.md — custom dimensions, metrics, and span names for KQL query authoring
+    execution_order: 6
+    agent: gem-documentation-writer
+    priority: medium
+    status: completed
+    depends_on: [T10]
+    context_files:
+      - "All project files": full codebase context
+    estimated_effort: medium
+    estimated_files: 5
+    estimated_lines: 400
+    focus_area: documentation
+    task_type: documentation
+    audience: developers
+    coverage_matrix:
+      - Project overview and architecture
+      - Setup and deployment instructions
+      - Performance comparison methodology
+      - Tuning parameter reference
+      - Telemetry schema reference
+    verification:
+      - All 5 documents created with complete content
+      - Mermaid diagram renders correctly
+      - Setup guide steps are executable end-to-end
+    acceptance_criteria:
+      - Developer can go from zero to running comparison using only the documentation
+      - All tuning parameters documented with rationale
+      - Telemetry schema matches actual implementation

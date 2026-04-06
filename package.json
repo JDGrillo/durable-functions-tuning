@@ -1,0 +1,21 @@
+{
+    "name": "durable-function-config-comparison",
+    "version": "1.0.0",
+    "private": true,
+    "description": "Compare performance of baseline vs tuned Azure Durable Function apps",
+    "workspaces": [
+        "packages/*",
+        "apps/*"
+    ],
+    "scripts": {
+        "build": "npm run build --workspaces",
+        "build:shared": "npm run build -w packages/shared",
+        "build:baseline": "npm run build -w apps/baseline",
+        "build:tuned": "npm run build -w apps/tuned",
+        "clean": "npm run clean --workspaces",
+        "test": "npm run test --workspaces --if-present"
+    },
+    "engines": {
+        "node": ">=20.0.0"
+    }
+}

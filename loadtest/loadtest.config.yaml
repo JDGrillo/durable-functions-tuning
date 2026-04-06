@@ -1,0 +1,35 @@
+version: v0.1
+testId: df-config-comparison
+testName: Durable Function Config Comparison
+description: >
+  Compares baseline vs tuned Durable Function app performance by
+  sending concurrent orchestration start requests to both apps simultaneously.
+
+testPlan: loadtest.jmx
+
+engineInstances: 1
+
+configurationFiles: []
+
+failureCriteria:
+  - avg(response_time_ms) > 5000
+  - percentage(error) > 10
+
+autoStop:
+  errorPercentage: 90
+  timeWindow: 60
+
+env:
+  # Override these with Terraform outputs or set in Azure Load Testing UI
+  - name: baseline_host
+    value: "func-dfcompareghvd-baseline.azurewebsites.net"
+  - name: tuned_host
+    value: "func-dfcompareghvd-tuned.azurewebsites.net"
+  - name: threads
+    value: "10"
+  - name: ramp_up
+    value: "30"
+  - name: duration
+    value: "300"
+  - name: blob_name
+    value: "sample.json"

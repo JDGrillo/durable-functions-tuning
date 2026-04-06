@@ -1,0 +1,14 @@
+// Orchestration Duration Comparison — P50, P95, P99 by app
+// Uses custom spans from TelemetryHelper.createOrchestrationSpan()
+customMetrics
+| where name == "df.orchestration.duration"
+| extend app_name = tostring(customDimensions.app_name)
+| where isnotempty(app_name)
+| summarize
+    P50 = percentile(value, 50),
+    P95 = percentile(value, 95),
+    P99 = percentile(value, 99),
+    Avg = avg(value),
+    Count = count()
+  by app_name, bin(timestamp, 1m)
+| order by timestamp asc, app_name asc

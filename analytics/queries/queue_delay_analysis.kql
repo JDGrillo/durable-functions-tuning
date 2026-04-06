@@ -1,0 +1,16 @@
+// Queue Delay Analysis — time between activity scheduled and started, by app
+customMetrics
+| where name == "df.activity.queue_delay"
+| extend
+    app_name = tostring(customDimensions.app_name),
+    activity_name = tostring(customDimensions.activity_name)
+| where isnotempty(app_name)
+| summarize
+    P50 = percentile(value, 50),
+    P95 = percentile(value, 95),
+    P99 = percentile(value, 99),
+    Avg = avg(value),
+    Max = max(value),
+    Count = count()
+  by app_name, bin(timestamp, 1m)
+| order by timestamp asc, app_name asc

@@ -1,0 +1,7 @@
+// Throughput Comparison — orchestrations completed per minute by app
+customMetrics
+| where name == "df.orchestration.completed"
+| extend app_name = tostring(customDimensions.app_name)
+| where isnotempty(app_name)
+| summarize Completions = sum(value) by app_name, bin(timestamp, 1m)
+| order by timestamp asc, app_name asc

@@ -1,0 +1,105 @@
+prd_id: durable-function-config-comparison
+version: "1.0.0"
+status: final
+
+features:
+  - name: Baseline Durable Function App
+    overview: |
+      Azure Durable Functions app (Node.js 20, v4 model) with default host.json configuration,
+      running 1 orchestrator + 3 sequential Blob Storage I/O activities on Elastic Premium EP3.
+    status: planned
+
+  - name: Tuned Durable Function App
+    overview: |
+      Identical business logic to baseline but with optimized host.json (concurrency, partitions,
+      queue batch size, extended sessions), tuned app settings (worker process count, Node memory),
+      and EP3 scaling config (always-ready, max burst, pre-warmed instances).
+    status: planned
+
+  - name: Custom OpenTelemetry Instrumentation
+    overview: |
+      Shared telemetry module emitting custom spans, histogram metrics, and correlation IDs for
+      every orchestrator and activity execution. Replay-safe. Reports to shared Application Insights
+      with cloud_RoleName differentiation (baseline vs tuned).
+    status: planned
+
+  - name: Terraform Infrastructure
+    overview: |
+      Full Azure infrastructure: 2x EP3 plans, 2x function apps, 4x storage accounts (2 task hubs + 2
+      workload blobs), 1x shared App Insights + Log Analytics, 1x Azure Load Testing resource.
+    status: planned
+
+  - name: Azure Load Testing Integration
+    overview: |
+      JMeter test plan targeting both function app endpoints with configurable concurrency and duration.
+      Azure Load Testing resource for managed execution. Manual HTTP trigger option for ad-hoc testing.
+    status: planned
+
+  - name: KQL Analytics & Workbook
+    overview: |
+      8 KQL queries for side-by-side performance comparison (duration, queue delay, throughput, errors,
+      scaling) and a 4-tab Azure Monitor Workbook template for visualization.
+    status: planned
+
+state_machines:
+  - name: Durable Orchestration Lifecycle
+    states: [Started, Activity1Running, Activity2Running, Activity3Running, Completed, Failed]
+    transitions:
+      - from: Started
+        to: Activity1Running
+        trigger: orchestrator schedules activity1BlobRead
+      - from: Activity1Running
+        to: Activity2Running
+        trigger: activity1 completes, orchestrator schedules activity2BlobTransform
+      - from: Activity2Running
+        to: Activity3Running
+        trigger: activity2 completes, orchestrator schedules activity3BlobWrite
+      - from: Activity3Running
+        to: Completed
+        trigger: activity3 completes, orchestrator returns result
+      - from: Activity1Running
+        to: Failed
+        trigger: activity1 throws unrecoverable error
+      - from: Activity2Running
+        to: Failed
+        trigger: activity2 throws unrecoverable error
+      - from: Activity3Running
+        to: Failed
+        trigger: activity3 throws unrecoverable error
+
+errors:
+  - code: ERR_BLOB_READ_001
+    message: Failed to read source blob — blob not found or storage unavailable
+  - code: ERR_BLOB_WRITE_001
+    message: Failed to write output blob — container not found or storage unavailable
+  - code: ERR_ORCHESTRATION_001
+    message: Orchestration failed — activity error exceeded retry policy
+
+decisions:
+  - decision: Monorepo with npm workspaces and shared package for identical business logic
+    rationale: |
+      Guarantees both apps execute byte-identical logic. Changes propagate to both apps
+      automatically. Simpler than git submodules or duplicated code.
+  - decision: Shared Application Insights instance for both function apps
+    rationale: |
+      Enables side-by-side KQL comparison using cloud_RoleName. Eliminates need to
+      cross-query multiple workspaces. Simpler workbook configuration.
+  - decision: Separate Storage accounts for each app's Durable Task hub and workload blobs
+    rationale: |
+      Each app gets its own task hub storage AND workload blob storage (4 accounts total).
+      Prevents both queue/table and blob I/O contention between apps. Ensures storage
+      metrics are fully isolated for accurate performance comparison.
+  - decision: OpenTelemetry manual instrumentation (not auto-instrumentation)
+    rationale: |
+      Auto-instrumentation may conflict with Durable Functions replay semantics.
+      Manual spans with isReplaying guards ensure accurate telemetry.
+  - decision: Azure Load Testing over self-hosted load testing tools
+    rationale: |
+      Managed service avoids provisioning load generation infrastructure. Native Azure
+      integration for CI/CD (future) and results correlation with App Insights.
+  - decision: Elastic Premium EP3 for both apps
+    rationale: |
+      EP3 (4 vCPU, 14 GB) provides sufficient headroom to observe tuning differences.
+      Same SKU for both ensures fair comparison — only configuration differs.
+
+changes: []

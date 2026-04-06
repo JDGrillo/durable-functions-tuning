@@ -1,0 +1,21 @@
+// Average Duration — orchestration and each activity by function app
+// Shows how long on average the overall orchestration and each individual
+// activity function takes, grouped by function app (baseline vs tuned).
+let orchestration_avg =
+    customMetrics
+    | where name == "df.orchestration.duration"
+    | extend app_name = tostring(customDimensions.app_name)
+    | where isnotempty(app_name)
+    | summarize AvgDurationMs = avg(value), Count = count() by app_name
+    | extend function_name = "orchestration (total)";
+let activity_avg =
+    customMetrics
+    | where name == "df.activity.duration"
+    | extend
+        app_name = tostring(customDimensions.app_name),
+        function_name = tostring(customDimensions.activity_name)
+    | where isnotempty(app_name) and isnotempty(function_name)
+    | summarize AvgDurationMs = avg(value), Count = count() by app_name, function_name;
+union orchestration_avg, activity_avg
+| project app_name, function_name, AvgDurationMs = round(AvgDurationMs, 2), Count
+| order by app_name asc, AvgDurationMs desc

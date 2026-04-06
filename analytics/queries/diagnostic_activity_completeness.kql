@@ -1,0 +1,36 @@
+// Raw Activity Spans Per Instance — no joins, just counts.
+// Use this to verify all 3 activity spans exist per orchestration instance
+// before trusting the per_instance_execution_timeline query.
+let orch =
+    dependencies
+    | where name startswith "orchestration:"
+    | extend
+        instance_id = tostring(customDimensions["df.orchestration_instance_id"]),
+        orch_duration_ms = todouble(customDimensions["df.orchestration_duration_ms"])
+    | where isnotempty(instance_id) and isnotnull(orch_duration_ms)
+    | summarize arg_max(timestamp, *) by instance_id
+    | extend orch_start = datetime_add("millisecond", -tolong(orch_duration_ms), timestamp)
+    | project instance_id, orch_start;
+let activity_summary =
+    dependencies
+    | where name startswith "activity:"
+    | extend
+        instance_id = tostring(customDimensions["df.orchestration_instance_id"]),
+        activity_name = tostring(customDimensions["df.activity_name"]),
+        app_name = tostring(customDimensions["df.app_name"]),
+        duration_ms = todouble(customDimensions["df.execution_duration_ms"])
+    | where isnotempty(instance_id)
+    | summarize
+        activity_count = count(),
+        activities = make_set(activity_name),
+        has_a1 = countif(activity_name == "activity1BlobRead") > 0,
+        has_a2 = countif(activity_name == "activity2BlobTransform") > 0,
+        has_a3 = countif(activity_name == "activity3BlobWrite") > 0,
+        app_name = take_any(app_name)
+      by instance_id;
+activity_summary
+| join kind=leftouter orch on instance_id
+| extend all_three = has_a1 and has_a2 and has_a3
+| project instance_id, app_name, orch_start, activity_count, activities, has_a1, has_a2, has_a3, all_three
+| order by orch_start desc
+| take 200

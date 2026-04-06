@@ -1,0 +1,59 @@
+// Per-Instance Execution Timeline — every orchestration with timestamps
+// for each step and the gaps between them.
+// Each row = one complete durable function execution.
+//
+// NOTE: The orchestration span is emitted at completion time (due to Durable
+// Functions replay). We derive the true start time by subtracting the recorded
+// orchestration duration from the span timestamp.
+//
+// Joins use df.orchestration_instance_id (set by TelemetryHelper on all spans).
+let orch =
+    dependencies
+    | where name startswith "orchestration:"
+    | extend
+        instance_id = tostring(customDimensions["df.orchestration_instance_id"]),
+        app_name = tostring(customDimensions["df.app_name"]),
+        orch_duration_ms = todouble(customDimensions["df.orchestration_duration_ms"])
+    | where isnotempty(instance_id) and isnotnull(orch_duration_ms)
+    | summarize arg_max(timestamp, *) by instance_id
+    | extend orch_start = datetime_add("millisecond", -tolong(orch_duration_ms), timestamp)
+    | project instance_id, app_name, orch_start, orch_duration_ms;
+let activities =
+    dependencies
+    | where name startswith "activity:"
+    | extend
+        instance_id = tostring(customDimensions["df.orchestration_instance_id"]),
+        activity_name = tostring(customDimensions["df.activity_name"]),
+        activity_duration_ms = todouble(customDimensions["df.execution_duration_ms"])
+    | where isnotempty(instance_id)
+    | project instance_id, activity_name, activity_start = timestamp, activity_duration_ms;
+let pivoted =
+    activities
+    | summarize
+        a1_start       = minif(activity_start, activity_name == "activity1BlobRead"),
+        a1_duration_ms = take_anyif(activity_duration_ms, activity_name == "activity1BlobRead"),
+        a2_start       = minif(activity_start, activity_name == "activity2BlobTransform"),
+        a2_duration_ms = take_anyif(activity_duration_ms, activity_name == "activity2BlobTransform"),
+        a3_start       = minif(activity_start, activity_name == "activity3BlobWrite"),
+        a3_duration_ms = take_anyif(activity_duration_ms, activity_name == "activity3BlobWrite")
+      by instance_id;
+orch
+| join kind=inner pivoted on instance_id
+| where isnotnull(a1_start) and isnotnull(a2_start) and isnotnull(a3_start)
+| extend
+    gap_orch_to_a1_ms = datetime_diff("millisecond", a1_start, orch_start),
+    gap_a1_to_a2_ms   = datetime_diff("millisecond", a2_start, a1_start) - tolong(a1_duration_ms),
+    gap_a2_to_a3_ms   = datetime_diff("millisecond", a3_start, a2_start) - tolong(a2_duration_ms)
+| project
+    instance_id,
+    app_name,
+    orch_start,
+    orch_duration_ms,
+    gap_orch_to_a1_ms,
+    a1_duration_ms,
+    gap_a1_to_a2_ms,
+    a2_duration_ms,
+    gap_a2_to_a3_ms,
+    a3_duration_ms
+| order by orch_start asc
+| take 100

@@ -1,0 +1,7 @@
+// Scaling Events — instance count changes over time by app
+// Uses requests table to count distinct role instances (reliable across SDK versions)
+requests
+| extend app_name = cloud_RoleName
+| where app_name in ("baseline", "tuned")
+| summarize InstanceCount = dcount(cloud_RoleInstance) by app_name, bin(timestamp, 1m)
+| order by timestamp asc, app_name asc

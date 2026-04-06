@@ -1,0 +1,164 @@
+research_id: T1-findings
+plan_id: perf-comparison-v1
+timestamp: "2026-04-01"
+status: complete
+
+findings:
+
+  # ─── 1. SDK VERSIONS ─────────────────────────────────────────
+  sdk_versions:
+    "@azure/functions": "^4.6.0"
+    "durable-functions": "^3.1.0"
+    "@azure/storage-blob": "^12.26.0"
+    "@opentelemetry/api": "^1.9.0"
+    "@opentelemetry/sdk-trace-node": "^1.30.0"
+    "@opentelemetry/sdk-metrics": "^1.30.0"
+    "@azure/monitor-opentelemetry-exporter": "^1.0.0-beta.28"
+    "applicationinsights": "^2.9.0 or ^3.x"
+    node_runtime: "20.x LTS"
+    programming_model: "v4"
+
+  # ─── 2. V4 PROGRAMMING MODEL PATTERNS ───────────────────────
+  v4_patterns:
+    registration:
+      orchestrator: "df.app.orchestration('name', function* (context) { ... })"
+      activity: "df.app.activity('name', { handler: async (input, context) => { ... } })"
+      http_starter: "app.http('name', { extraInputs: [df.input.durableClient()], handler: async (req, context) => { ... } })"
+    orchestrator_notes:
+      - "Orchestrators use generator function* syntax"
+      - "Activities are called with: yield context.df.callActivity('name', input)"
+      - "Input accessed via context.df.getInput()"
+      - "Orchestrator functions should never be async — use function* generators"
+      - "context.df.isReplaying indicates if current execution is a replay"
+    client_pattern: "const client = df.getClient(context); await client.startNew('orchestrator', { input })"
+
+  # ─── 3. HOST.JSON TUNING PARAMETERS ─────────────────────────
+  host_json_tuning:
+    location: "extensions.durableTask"
+    parameters:
+      maxConcurrentActivityFunctions:
+        default_premium: "10 * processor count"
+        ep3_default: 40  # 4 vCPU * 10
+        recommended_tuned: 80  # 2x default for I/O-bound work
+        rationale: "I/O-bound activities spend time waiting on storage; higher concurrency saturates network better"
+      maxConcurrentOrchestratorFunctions:
+        default_premium: "10 * processor count"
+        ep3_default: 40
+        recommended_tuned: 80
+        rationale: "Orchestrators are lightweight dispatchers; can handle higher concurrency"
+      controlQueueBatchSize:
+        default: 32
+        recommended_tuned: 64
+        rationale: "Larger batch size reduces polling frequency; better for high-throughput"
+      controlQueueBufferThreshold:
+        default_premium: 256
+        recommended_tuned: 512
+        rationale: "Higher buffer threshold keeps more messages in memory for faster dispatch"
+      partitionCount:
+        default: 4
+        max: 16
+        recommended_tuned: 8
+        rationale: "More partitions = more parallelism for orchestrations; can't change after hub creation"
+        warning: "Cannot be changed after task hub is created"
+      extendedSessionsEnabled:
+        default: false
+        recommended_tuned: false
+        critical_note: "Extended sessions only supported in .NET in-process worker. NOT available for Node.js."
+      maxQueuePollingInterval:
+        default: "00:00:30"
+        recommended_tuned: "00:00:05"
+        rationale: "Lower polling interval reduces latency between activity completion and orchestrator pickup"
+      useTablePartitionManagement:
+        default_v3: true
+        recommended: true
+        rationale: "Reduces costs for Azure Storage v2 accounts"
+
+  # ─── 4. APP-LEVEL TUNING ────────────────────────────────────
+  app_level_tuning:
+    FUNCTIONS_WORKER_PROCESS_COUNT:
+      default: 1
+      max: 10
+      recommended_tuned: 4
+      rationale: "Multiple worker processes for Node.js; EP3 has 4 vCPU so 4 workers is reasonable"
+      warning: "Can increase function load times; use run-from-package to offset"
+    NODE_OPTIONS:
+      recommended_tuned: "--max-old-space-size=10240"
+      rationale: "EP3 has 14GB RAM; 10GB for Node.js heap leaves headroom for OS + runtime"
+    WEBSITE_MAX_DYNAMIC_APPLICATION_SCALE_OUT:
+      note: "Not applicable to Elastic Premium — use plan-level scaling instead"
+
+  # ─── 5. EP3 SCALING CONFIG ──────────────────────────────────
+  ep3_scaling:
+    sku: "EP3"
+    vcpu: 4
+    memory_gb: 14
+    always_ready_instance_count:
+      recommended: 2
+      rationale: "Ensures no cold start for baseline load"
+    maximum_scale_out_limit:
+      recommended: 10
+      rationale: "Allows burst to 10 instances for load test scenarios"
+    pre_warmed_instance_count:
+      recommended: 1
+      rationale: "Pre-warms 1 additional instance for faster scale-out"
+    elastic_scale_enabled: true
+
+  # ─── 6. OPENTELEMETRY INTEGRATION ───────────────────────────
+  opentelemetry_integration:
+    recommended_approach: "manual_instrumentation"
+    packages:
+      - "@opentelemetry/api — core API for creating spans and metrics"
+      - "@opentelemetry/sdk-trace-node — NodeTracerProvider for trace export"
+      - "@opentelemetry/sdk-metrics — MeterProvider for metric instruments"
+      - "@azure/monitor-opentelemetry-exporter — exports to App Insights"
+    alternative_package: "@azure/functions-opentelemetry-instrumentation (auto-instrumentation, may conflict with DF replay)"
+    applicationinsights_sdk:
+      note: "Can also use 'applicationinsights' npm package for simpler custom events/metrics"
+      correlation: "Use tagOverrides with ai.operation.id = context.traceContext.traceparent"
+    replay_handling:
+      critical: true
+      approach: |
+        In orchestrator functions, check context.df.isReplaying before emitting telemetry.
+        Only create spans and record metrics when isReplaying is false.
+        Activities do NOT replay, so no guard needed in activity functions.
+      code_pattern: |
+        if (!context.df.isReplaying) {
+          // emit telemetry here
+        }
+    cloud_role_name:
+      approach: "Set via resource attributes or App Insights connection string app setting"
+      baseline_value: "baseline"
+      tuned_value: "tuned"
+    custom_dimensions:
+      - appName (baseline|tuned)
+      - orchestrationInstanceId
+      - activityName
+      - blobSize
+      - operationType (read|transform|write)
+      - queueDelayMs
+      - executionDurationMs
+
+  # ─── 7. BLOB SDK BEST PRACTICES ─────────────────────────────
+  blob_sdk_practices:
+    singleton_client: true
+    rationale: "Use a single static BlobServiceClient per app to avoid connection exhaustion"
+    connection_pooling: "BlobServiceClient handles connection pooling internally via HTTP pipeline"
+    retry_policy:
+      default_retries: 3
+      recommended: "Use default exponential retry; no custom config needed for comparison"
+    performance_tips:
+      - "Reuse BlobServiceClient across invocations (module-level singleton)"
+      - "Use streaming for large blobs to reduce memory pressure"
+      - "Set proper content type and metadata"
+
+  # ─── 8. KEY RISKS & MITIGATIONS ─────────────────────────────
+  risks_discovered:
+    - risk: "extendedSessionsEnabled is NOT supported for Node.js"
+      impact: "Cannot use extended sessions for orchestrator caching in this project"
+      mitigation: "Remove from tuned host.json; rely on concurrency and partition tuning instead"
+    - risk: "OpenTelemetry auto-instrumentation may double-count orchestrator replays"
+      impact: "Duplicate trace data in App Insights"
+      mitigation: "Use manual instrumentation with isReplaying guard"
+    - risk: "FUNCTIONS_WORKER_PROCESS_COUNT > 1 increases cold start times"
+      impact: "May skew initial comparison results"
+      mitigation: "Use always-ready instances + run-from-package; ensure warm-up before measurement"

@@ -1,0 +1,22 @@
+// Gap Explanation — what happens between activities.
+// Shows Durable Task Framework internal events for a specific instance
+// to explain WHERE time is spent during gaps.
+//
+// The gap between activities includes:
+//   1. Activity result written to control queue (Azure Storage queue put)
+//   2. Orchestrator worker polls control queue (up to maxQueuePollingInterval)
+//   3. Orchestrator function replays from scratch (re-executes all yields)
+//   4. Orchestrator schedules next activity (Azure Storage queue put)
+//   5. Activity worker polls work-item queue (up to maxQueuePollingInterval)
+//   6. Activity function cold start (if new worker)
+//
+// Replace INSTANCE_ID below.
+let target_instance_id = "INSTANCE_ID";
+// Durable Task Framework logs with categories that explain gaps
+traces
+| where message has target_instance_id
+| extend
+    category = tostring(customDimensions["Category"]),
+    log_level = tostring(customDimensions["LogLevel"])
+| project timestamp, category, message
+| order by timestamp asc
