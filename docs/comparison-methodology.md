@@ -79,7 +79,7 @@ After each test run:
 
 ## Limitations
 
-- Both apps use Azure Storage provider (not Netherite/MSSQL) — results are storage-provider-specific
+- Both apps use the Azure Storage provider (not Durable Task Scheduler or MSSQL) — results are storage-provider-specific
 - EP3 SKU is fixed — results don't apply to consumption or different premium SKUs
 - `extendedSessionsEnabled` is not available for Node.js (only .NET in-process) — cannot test this optimization
 - Blob I/O is the workload — results may differ for CPU-bound or external API workloads

@@ -422,6 +422,181 @@ curl -X POST https://<externalized-app>/api/orchestrators/externalizedOrchestrat
   -d '{"blobNames": ["large-1mb.json", "large-500kb.json", "large-200kb.json"]}'
 ```
 
+## Future Optimizations
+
+### Storage Isolation for Intermediate Payloads
+
+The current infrastructure uses a single storage account (`externalized_blobs`) for input, output, **and** intermediate-payload containers. At moderate load this is fine, but under high concurrency (500+ simultaneous orchestrations), the intermediate reads/writes (2 per orchestration) compete with input/output I/O on the same account's IOPS budget (~20K ops/sec for Standard LRS).
+
+**Optimization:** Add a dedicated storage account for `intermediate-payloads` to isolate the high-frequency store/retrieve traffic from workload blob operations.
+
+### Partition Count Scaling
+
+`partitionCount` (currently 4) caps the maximum parallelism for orchestration scheduling — each partition is processed by one worker at a time. Under sustained high throughput, this becomes the bottleneck.
+
+**Important:** `partitionCount` cannot be changed after a task hub is created. Scaling requires creating a new task hub with the desired count.
+
+| Concurrency Target | Recommended `partitionCount` |
+|-------------------|------------------------------|
+| < 200 concurrent orchestrations | 4 (current) |
+| 200–1000 | 8 |
+| 1000–5000 | 16 |
+| 5000+ | Migrate to Durable Task Scheduler (manages partitioning internally) |
+
+### SKU Upgrades
+
+| Current | Upgrade Path | When to Consider |
+|---------|-------------|-----------------|
+| **P0v3** (1 vCPU, 4GB RAM) | **P1v3** (2 vCPU, 8GB) | Per-instance memory pressure with 4 Node.js workers |
+| **P0v3** | **P2v3** (4 vCPU, 16GB) | Need higher per-instance concurrency limits (40+ orchestrations) |
+| **P0v3** | **EP1–EP3** (Elastic Premium) | Need auto-scale to zero + burst scaling |
+| **Standard LRS storage** | **Premium Block Blob** | Sub-millisecond blob latency needed for intermediates |
+
+**Node.js memory formula:**
+```
+max_workers = floor(SKU_RAM_GB × 0.8 / per_worker_heap_GB)
+per_worker_capacity = maxConcurrentOrchestratorFunctions × avg_history_size_MB
+```
+
+### Architectural Scaling Patterns
+
+#### Dedicated Storage Account per Concern
+
+```mermaid
+graph LR
+    FA[Function App] --> TH[(Task Hub Storage<br/>queues + tables + leases)]
+    FA --> IN[(Input Blobs)]
+    FA --> OUT[(Output Blobs)]
+    FA --> INT[(Intermediate Blobs)]
+
+    style TH fill:#FF9800,color:white
+    style IN fill:#2196F3,color:white
+    style OUT fill:#4CAF50,color:white
+    style INT fill:#9C27B0,color:white
+```
+
+At very high scale, each storage account should be isolated so IOPS limits are independent.
+
+#### Multi-Worker Process Model
+
+```
+EP3 (14 GB RAM)
+├── Worker 1 (--max-old-space-size=3072)
+│   └── 10 concurrent orchestrations
+├── Worker 2 (--max-old-space-size=3072)
+│   └── 10 concurrent orchestrations
+├── Worker 3 (--max-old-space-size=3072)
+│   └── 10 concurrent orchestrations
+└── Worker 4 (--max-old-space-size=3072)
+    └── 10 concurrent orchestrations
+    = 40 concurrent orchestrations per instance
+```
+
+Set `FUNCTIONS_WORKER_PROCESS_COUNT=4` and `NODE_OPTIONS=--max-old-space-size=3072` to maximize per-instance throughput. Each worker is independent and has its own V8 heap.
+
+#### Durable Task Scheduler (High Throughput)
+
+For workloads exceeding ~2000 concurrent orchestrations, the Azure Storage provider's queue-based dispatch becomes the bottleneck. The [Durable Task Scheduler](https://learn.microsoft.com/en-us/azure/durable-task/scheduler/durable-task-scheduler) is Microsoft's recommended fully managed backend for high-performance scenarios:
+
+```json
+{
+  "extensions": {
+    "durableTask": {
+      "hubName": "%TASKHUB_NAME%",
+      "storageProvider": {
+        "type": "azureManaged",
+        "connectionStringName": "DURABLE_TASK_SCHEDULER_CONNECTION_STRING"
+      }
+    }
+  }
+}
+```
+
+Key benefits:
+- **Highest throughput** of all supported storage providers
+- **Fully managed** — no storage accounts, partitions, or queue polling to configure
+- **Built-in observability** [dashboard](https://learn.microsoft.com/en-us/azure/durable-task/scheduler/durable-task-scheduler-dashboard) for orchestration monitoring
+- **Managed identity support** with automatic RBAC (`Durable Task Data Contributor` role)
+- **No code changes** required — only `host.json` and connection configuration
+- **Docker-based emulator** for local development (`mcr.microsoft.com/dts/dts-emulator:latest`)
+- **Partitioning managed internally** — no need to plan or configure `partitionCount`
+
+**Trade-offs:** Requires an Azure Durable Task Scheduler resource (separate billing), but eliminates storage account IOPS management, partition count planning, and queue polling tuning entirely. Supports Flex Consumption, Premium, and App Service plans.
+
+#### Intermediate Payload Lifecycle Management
+
+Intermediate blobs accumulate indefinitely. Add an Azure Storage lifecycle management policy to auto-delete after retention period:
+
+```json
+{
+  "rules": [{
+    "name": "cleanup-intermediates",
+    "type": "Lifecycle",
+    "definition": {
+      "filters": { "blobTypes": ["blockBlob"], "prefixMatch": ["intermediate-payloads/"] },
+      "actions": { "baseBlob": { "delete": { "daysAfterModificationGreaterThan": 7 } } }
+    }
+  }]
+}
+```
+
+Alternatively, add a cleanup activity at orchestration completion to delete its intermediate blobs immediately.
+
+#### Horizontal Scaling via Multiple Task Hubs
+
+For extreme scale, route orchestrations across multiple task hubs by orchestrator type or tenant:
+
+```mermaid
+graph TD
+    LB[Load Balancer / API Gateway] --> R{Route by type}
+    R -->|Batch jobs| TH1[Task Hub A<br/>16 partitions]
+    R -->|Real-time| TH2[Task Hub B<br/>8 partitions]
+    R -->|Low priority| TH3[Task Hub C<br/>4 partitions]
+
+    TH1 --> FA1[Function App Pool 1]
+    TH2 --> FA2[Function App Pool 2]
+    TH3 --> FA3[Function App Pool 3]
+```
+
+Each task hub is independent with its own storage accounts, partition counts, and concurrency settings.
+
+### Scaling Decision Matrix
+
+| Symptom | Metric to Watch | Action |
+|---------|----------------|--------|
+| High queue delay | `orchestration_to_first_activity_latency` > 5s | Increase `partitionCount` (new task hub) or `max_scale_out` |
+| Storage throttling | HTTP 429/503 from Azure Storage | Separate storage accounts per concern |
+| Worker memory exhaustion | Heap usage > 80% of `max-old-space-size` | Lower `maxConcurrentOrchestratorFunctions` or upgrade SKU |
+| All instances at max | Scale-out at ceiling for sustained period | Increase `max_scale_out` or add more workers per instance |
+| Activity latency spikes | Blob `SuccessServerLatency` P99 > 200ms | Upgrade to Premium Block Blob storage |
+| Replay taking too long | Orchestration replay duration > 5s | Reduce history size (externalize payloads, use `continueAsNew`) |
+| Single-instance CPU saturated | CPU > 90% sustained | Upgrade SKU (P1v3 → P2v3) or increase `FUNCTIONS_WORKER_PROCESS_COUNT` |
+
+### Concurrency Tuning Best Practices
+
+From [Azure documentation](https://learn.microsoft.com/en-us/azure/azure-functions/durable/durable-functions-perf-and-scale#concurrency-throttles):
+
+- **Concurrency throttles are per-worker, not system-wide.** Lowering per-worker concurrency can actually *increase* total throughput by triggering the scale controller to add more workers to keep up with queues.
+- **Orchestrations unload from memory while awaiting.** Only orchestrations actively processing events count toward `maxConcurrentOrchestratorFunctions`. Millions of instances can be in "Running" state without hitting the throttle.
+- **Node.js concurrency is limited by `FUNCTIONS_WORKER_PROCESS_COUNT`.** Each worker process runs its own event loop. Set concurrency limits to match your worker count × per-worker capacity.
+- **On Premium plans, enable Runtime Scale Monitoring** after deployment to ensure autoscale responds to Durable Task queue depth:
+  ```bash
+  az resource update -g <resource_group> -n <app_name>/config/web \
+    --set properties.functionsRuntimeScaleMonitoringEnabled=1 \
+    --resource-type Microsoft.Web/sites
+  ```
+
+### Flex Consumption Plan
+
+For new deployments, consider the [Flex Consumption plan](https://learn.microsoft.com/en-us/azure/azure-functions/flex-consumption-plan) which provides:
+
+- **Scale to zero** with fast cold starts
+- **Per-function scaling** — orchestrator and activity functions scale independently
+- **VNet integration** included at no extra cost
+- **Native support** for both Azure Storage provider and Durable Task Scheduler
+
+The Flex Consumption plan pairs well with the Durable Task Scheduler for the best serverless + high-throughput combination.
+
 ## Documentation
 
 - [Setup Guide](docs/setup-guide.md) — Full deployment walkthrough
