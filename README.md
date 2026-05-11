@@ -548,7 +548,7 @@ For extreme scale, route orchestrations across multiple task hubs by orchestrato
 
 ```mermaid
 graph TD
-    LB[Load Balancer / API Gateway] --> R{Route by type}
+    LB[Load Balancer / API Gateway ] --> R{Route by type}
     R -->|Batch jobs| TH1[Task Hub A<br/>16 partitions]
     R -->|Real-time| TH2[Task Hub B<br/>8 partitions]
     R -->|Low priority| TH3[Task Hub C<br/>4 partitions]
