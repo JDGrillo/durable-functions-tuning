@@ -1,0 +1,22 @@
+// Payload Size Distribution — Distribution of input and output payload sizes
+// by activity name and app, showing how inline vs externalized patterns differ
+customMetrics
+| where name in ("df.payload.input_bytes", "df.payload.output_bytes")
+| where cloud_RoleName in ("inline-payloads", "externalized-payloads")
+| extend
+    activity_name = tostring(customDimensions["activity_name"]),
+    is_externalized = tostring(customDimensions["df.payload_is_externalized"]),
+    direction = case(name == "df.payload.input_bytes", "input", "output")
+| summarize
+    count_ = count(),
+    avg_bytes = avg(value),
+    p50_bytes = percentile(value, 50),
+    p95_bytes = percentile(value, 95),
+    max_bytes = max(value),
+    total_bytes = sum(value)
+    by cloud_RoleName, activity_name, direction, is_externalized
+| extend
+    avg_kb = round(avg_bytes / 1024, 1),
+    p95_kb = round(p95_bytes / 1024, 1),
+    max_kb = round(max_bytes / 1024, 1)
+| order by cloud_RoleName asc, activity_name asc, direction asc

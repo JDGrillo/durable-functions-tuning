@@ -7,6 +7,44 @@ description: >
 
 testPlan: loadtest.jmx
 
+---
+# OOM Payload Comparison — Inline vs Externalized
+version: v0.1
+testId: df-oom-payload-comparison
+testName: OOM Payload Comparison - Inline vs Externalized
+description: >
+  Compares inline payload (OOM anti-pattern) vs externalized payload (best practice)
+  Durable Function apps. Sends large blob orchestrations (200KB–1.6MB) to both apps
+  simultaneously to observe memory pressure differences under concurrency.
+
+testPlan: loadtest-oom.jmx
+
+engineInstances: 1
+
+configurationFiles: []
+
+failureCriteria:
+  - avg(response_time_ms) > 10000
+  - percentage(error) > 20
+
+autoStop:
+  errorPercentage: 90
+  timeWindow: 60
+
+env:
+  - name: inline_host
+    value: "inline.azurewebsites.net"
+  - name: externalized_host
+    value: "externalized.azurewebsites.net"
+  - name: oom_threads
+    value: "20"
+  - name: oom_ramp_up
+    value: "60"
+  - name: oom_duration
+    value: "600"
+  - name: oom_blob_name
+    value: "large-1mb.json"
+
 engineInstances: 1
 
 configurationFiles: []
@@ -22,9 +60,13 @@ autoStop:
 env:
   # Override these with Terraform outputs or set in Azure Load Testing UI
   - name: baseline_host
-    value: "func-dfcompareghvd-baseline.azurewebsites.net"
+    value: "baseline.azurewebsites.net"
   - name: tuned_host
-    value: "func-dfcompareghvd-tuned.azurewebsites.net"
+    value: "tuned.azurewebsites.net"
+  - name: inline_host
+    value: "inline.azurewebsites.net"
+  - name: externalized_host
+    value: "externalized.azurewebsites.net"
   - name: threads
     value: "10"
   - name: ramp_up
@@ -33,3 +75,7 @@ env:
     value: "300"
   - name: blob_name
     value: "sample.json"
+  - name: oom_threads
+    value: "20"
+  - name: oom_blob_name
+    value: "large-1mb.json"

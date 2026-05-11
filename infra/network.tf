@@ -55,6 +55,36 @@ resource "azurerm_subnet" "dfmon" {
   }
 }
 
+resource "azurerm_subnet" "inline" {
+  name                 = "snet-inline"
+  resource_group_name  = azurerm_resource_group.rg.name
+  virtual_network_name = azurerm_virtual_network.vnet.name
+  address_prefixes     = ["10.0.4.0/24"]
+
+  delegation {
+    name = "Microsoft.Web"
+    service_delegation {
+      name    = "Microsoft.Web/serverFarms"
+      actions = ["Microsoft.Network/virtualNetworks/subnets/action"]
+    }
+  }
+}
+
+resource "azurerm_subnet" "externalized" {
+  name                 = "snet-externalized"
+  resource_group_name  = azurerm_resource_group.rg.name
+  virtual_network_name = azurerm_virtual_network.vnet.name
+  address_prefixes     = ["10.0.5.0/24"]
+
+  delegation {
+    name = "Microsoft.Web"
+    service_delegation {
+      name    = "Microsoft.Web/serverFarms"
+      actions = ["Microsoft.Network/virtualNetworks/subnets/action"]
+    }
+  }
+}
+
 resource "azurerm_subnet" "private_endpoints" {
   name                 = "snet-pe"
   resource_group_name  = azurerm_resource_group.rg.name
@@ -173,6 +203,50 @@ locals {
       storage_account_id = azurerm_storage_account.dfmon.id
       subresource        = "table"
       dns_zone_id        = azurerm_private_dns_zone.table.id
+    }
+
+    # ─── OOM Scenario: Inline-payloads ───────────────────────────
+    "il-taskhub-blob" = {
+      storage_account_id = azurerm_storage_account.inline_taskhub.id
+      subresource        = "blob"
+      dns_zone_id        = azurerm_private_dns_zone.blob.id
+    }
+    "il-taskhub-queue" = {
+      storage_account_id = azurerm_storage_account.inline_taskhub.id
+      subresource        = "queue"
+      dns_zone_id        = azurerm_private_dns_zone.queue.id
+    }
+    "il-taskhub-table" = {
+      storage_account_id = azurerm_storage_account.inline_taskhub.id
+      subresource        = "table"
+      dns_zone_id        = azurerm_private_dns_zone.table.id
+    }
+    "il-blob" = {
+      storage_account_id = azurerm_storage_account.inline_blobs.id
+      subresource        = "blob"
+      dns_zone_id        = azurerm_private_dns_zone.blob.id
+    }
+
+    # ─── OOM Scenario: Externalized-payloads ─────────────────────
+    "ex-taskhub-blob" = {
+      storage_account_id = azurerm_storage_account.externalized_taskhub.id
+      subresource        = "blob"
+      dns_zone_id        = azurerm_private_dns_zone.blob.id
+    }
+    "ex-taskhub-queue" = {
+      storage_account_id = azurerm_storage_account.externalized_taskhub.id
+      subresource        = "queue"
+      dns_zone_id        = azurerm_private_dns_zone.queue.id
+    }
+    "ex-taskhub-table" = {
+      storage_account_id = azurerm_storage_account.externalized_taskhub.id
+      subresource        = "table"
+      dns_zone_id        = azurerm_private_dns_zone.table.id
+    }
+    "ex-blob" = {
+      storage_account_id = azurerm_storage_account.externalized_blobs.id
+      subresource        = "blob"
+      dns_zone_id        = azurerm_private_dns_zone.blob.id
     }
   }
 }

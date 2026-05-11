@@ -1,0 +1,12 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "node",
+    "APPLICATIONINSIGHTS_CONNECTION_STRING": "<your-app-insights-connection-string>",
+    "BLOB_STORAGE_ACCOUNT_NAME": "UseDevelopmentStorage=true",
+    "BLOB_INPUT_CONTAINER": "input",
+    "BLOB_OUTPUT_CONTAINER": "output",
+    "APP_NAME": "inline-payloads"
+  }
+}

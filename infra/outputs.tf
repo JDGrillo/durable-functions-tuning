@@ -51,3 +51,29 @@ output "dfmon_baseline_url" {
 output "dfmon_tuned_url" {
   value = "https://${azurerm_windows_function_app.dfmon_tuned.default_hostname}"
 }
+
+# ─── OOM Scenario Outputs ─────────────────────────────────────
+
+output "inline_function_app_url" {
+  value = "https://${azurerm_linux_function_app.inline.default_hostname}"
+}
+
+output "externalized_function_app_url" {
+  value = "https://${azurerm_linux_function_app.externalized.default_hostname}"
+}
+
+output "inline_taskhub_account_name" {
+  value = azurerm_storage_account.inline_taskhub.name
+}
+
+output "externalized_taskhub_account_name" {
+  value = azurerm_storage_account.externalized_taskhub.name
+}
+
+output "inline_blobs_account_name" {
+  value = azurerm_storage_account.inline_blobs.name
+}
+
+output "externalized_blobs_account_name" {
+  value = azurerm_storage_account.externalized_blobs.name
+}

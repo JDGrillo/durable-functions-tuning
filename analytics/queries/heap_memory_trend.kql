@@ -1,0 +1,18 @@
+// Heap Memory Trend — Track heap_used, heap_total, and rss over time
+// Faceted by cloud_RoleName to compare inline-payloads vs externalized-payloads
+customMetrics
+| where name startswith "df.memory."
+| where cloud_RoleName in ("inline-payloads", "externalized-payloads")
+| extend metric_type = case(
+    name == "df.memory.heap_used_mb", "heap_used_mb",
+    name == "df.memory.heap_total_mb", "heap_total_mb",
+    name == "df.memory.rss_mb", "rss_mb",
+    name == "df.memory.external_mb", "external_mb",
+    "other")
+| summarize
+    avg_value = avg(value),
+    max_value = max(value),
+    p95_value = percentile(value, 95)
+    by bin(timestamp, 1m), cloud_RoleName, metric_type
+| order by timestamp asc
+| project timestamp, cloud_RoleName, metric_type, avg_value, max_value, p95_value

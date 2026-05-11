@@ -1,5 +1,5 @@
 prd_id: durable-function-config-comparison
-version: "1.0.0"
+version: "2.0.0"
 status: final
 
 features:
@@ -41,6 +41,31 @@ features:
       scaling) and a 4-tab Azure Monitor Workbook template for visualization.
     status: planned
 
+  - name: Inline-Payloads Durable Function App (OOM Anti-Pattern)
+    overview: |
+      Azure Durable Functions app demonstrating the OOM anti-pattern — passes large payloads
+      (200KB-1.6MB) inline through orchestration activity I/O. Uses default high concurrency
+      settings (40/40). Three activities (dataEnricher, expressionResolver, dataTransformer)
+      model a customer scenario where inline payload accumulation causes memory pressure
+      and OOM kills under concurrent load.
+    status: planned
+
+  - name: Externalized-Payloads Durable Function App (Best Practice)
+    overview: |
+      Azure Durable Functions app demonstrating the recommended pattern — stores intermediate
+      payloads in Blob Storage and passes only blob URI references through orchestration I/O.
+      Uses reduced concurrency settings (10/5). Includes continueAsNew sub-orchestrator to
+      prevent unbounded orchestration history growth. Same business logic as inline-payloads
+      but with dramatically lower memory footprint.
+    status: planned
+
+  - name: Memory Usage Telemetry
+    overview: |
+      Custom OpenTelemetry metrics tracking process.memoryUsage() (heapUsed, heapTotal, rss)
+      after every activity execution. Payload size metrics (input/output bytes) and
+      externalization dimension for comparing inline vs blob reference patterns.
+    status: planned
+
 state_machines:
   - name: Durable Orchestration Lifecycle
     states: [Started, Activity1Running, Activity2Running, Activity3Running, Completed, Failed]
@@ -67,6 +92,65 @@ state_machines:
         to: Failed
         trigger: activity3 throws unrecoverable error
 
+  - name: OOM Payload Orchestration Lifecycle (Inline)
+    states: [Started, Enriching, Resolving, Transforming, Completed, Failed, OOMKilled]
+    transitions:
+      - from: Started
+        to: Enriching
+        trigger: orchestrator schedules dataEnricher with full inline payload
+      - from: Enriching
+        to: Resolving
+        trigger: dataEnricher completes, full enriched payload returned inline
+      - from: Resolving
+        to: Transforming
+        trigger: expressionResolver completes, full resolved payload returned inline
+      - from: Transforming
+        to: Completed
+        trigger: dataTransformer completes, full transformed payload returned inline
+      - from: Enriching
+        to: OOMKilled
+        trigger: container OOM-killed due to accumulated inline payload memory
+      - from: Resolving
+        to: OOMKilled
+        trigger: container OOM-killed during replay with large history
+      - from: Enriching
+        to: Failed
+        trigger: activity throws unrecoverable error
+      - from: Resolving
+        to: Failed
+        trigger: activity throws unrecoverable error
+      - from: Transforming
+        to: Failed
+        trigger: activity throws unrecoverable error
+
+  - name: OOM Payload Orchestration Lifecycle (Externalized + continueAsNew)
+    states: [Started, Enriching, Resolving, Transforming, BatchComplete, ContinuingAsNew, Completed, Failed]
+    transitions:
+      - from: Started
+        to: Enriching
+        trigger: orchestrator schedules dataEnricher with blob URI reference
+      - from: Enriching
+        to: Resolving
+        trigger: dataEnricher completes, returns blob URI reference (~200 bytes)
+      - from: Resolving
+        to: Transforming
+        trigger: expressionResolver completes, returns blob URI reference
+      - from: Transforming
+        to: BatchComplete
+        trigger: dataTransformer completes current batch item
+      - from: BatchComplete
+        to: Enriching
+        trigger: more items in batch, process next item
+      - from: BatchComplete
+        to: ContinuingAsNew
+        trigger: batch limit reached, call continueAsNew to reset history
+      - from: ContinuingAsNew
+        to: Started
+        trigger: orchestrator restarts with fresh history and continuation state
+      - from: BatchComplete
+        to: Completed
+        trigger: all items processed, no more batches
+
 errors:
   - code: ERR_BLOB_READ_001
     message: Failed to read source blob — blob not found or storage unavailable
@@ -74,6 +158,12 @@ errors:
     message: Failed to write output blob — container not found or storage unavailable
   - code: ERR_ORCHESTRATION_001
     message: Orchestration failed — activity error exceeded retry policy
+  - code: ERR_OOM_001
+    message: Container terminated by OOM killer (exit code 137) — inline payload memory exceeded container limit
+  - code: ERR_PAYLOAD_STORE_001
+    message: Failed to externalize payload to blob storage — container not found or storage unavailable
+  - code: ERR_PAYLOAD_RETRIEVE_001
+    message: Failed to retrieve externalized payload from blob storage — blob not found or expired
 
 decisions:
   - decision: Monorepo with npm workspaces and shared package for identical business logic
@@ -101,5 +191,25 @@ decisions:
     rationale: |
       EP3 (4 vCPU, 14 GB) provides sufficient headroom to observe tuning differences.
       Same SKU for both ensures fair comparison — only configuration differs.
+  - decision: Externalize large payloads via Blob Storage for the remediated (externalized-payloads) app
+    rationale: |
+      Passing multi-hundred-KB to multi-MB payloads inline through orchestration I/O causes
+      unbounded memory growth during replay. Storing payloads in blobs and passing only URI
+      references (~200 bytes) keeps orchestration history small and memory stable.
+  - decision: Use continueAsNew in the externalized-payloads app sub-orchestrator for batch processing
+    rationale: |
+      Long-running orchestrations accumulate history events indefinitely. continueAsNew resets
+      the history after each batch, preventing unbounded event accumulation and reducing
+      replay memory cost.
+  - decision: Separate shared-oom package rather than extending shared package
+    rationale: |
+      The OOM scenario has fundamentally different activity logic (data enrichment/resolution/transformation
+      vs blob I/O) and different telemetry requirements (memory tracking). Keeping it isolated avoids
+      polluting the existing comparison scenario.
 
-changes: []
+changes:
+  - version: "2.0.0"
+    change: |
+      Added OOM payload scenario with inline-payloads and externalized-payloads apps,
+      packages/shared-oom package, memory telemetry, continueAsNew pattern, and
+      KQL queries for memory analysis. Extends Terraform for 2 additional function apps.

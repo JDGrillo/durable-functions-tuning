@@ -1,0 +1,26 @@
+{
+    "version": "2.0",
+    "logging": {
+        "applicationInsights": {
+            "samplingSettings": {
+                "isEnabled": true,
+                "excludedTypes": "Request;Dependency"
+            }
+        }
+    },
+    "extensionBundle": {
+        "id": "Microsoft.Azure.Functions.ExtensionBundle",
+        "version": "[4.*, 5.0.0)"
+    },
+    "extensions": {
+        "durableTask": {
+            "storageProvider": {
+                "type": "AzureStorage",
+                "partitionCount": 4,
+                "controlQueueBufferThreshold": 256
+            },
+            "maxConcurrentActivityFunctions": 40,
+            "maxConcurrentOrchestratorFunctions": 40
+        }
+    }
+}

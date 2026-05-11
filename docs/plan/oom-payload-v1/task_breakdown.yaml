@@ -1,0 +1,905 @@
+plan_id: oom-payload-v1
+objective: |
+  Add a second pair of Durable Function apps (inline-payloads vs externalized-payloads) that
+  demonstrate the OOM anti-pattern of passing large payloads inline through the Durable Task
+  framework versus the best-practice pattern of externalizing payloads to Blob Storage and
+  passing only references. The problematic app reproduces the customer scenario — memory
+  pressure visible in telemetry under moderate concurrency. The remediated app uses blob URI
+  references, lower concurrency limits, and continueAsNew for long-running orchestrations.
+created_at: "2026-05-08"
+created_by: requirements-planner
+status: approved
+research_confidence: high
+
+tldr: |
+  Two new apps — inline-payloads (anti-pattern) and externalized-payloads (best practice).
+  New shared-oom package with 3 activities (dataEnricher, expressionResolver, dataTransformer)
+  that process large payloads (200KB-1.6MB). The inline app passes full payloads through
+  orchestration I/O; the externalized app stores payloads in blobs and passes only URIs.
+  Custom telemetry tracks heap memory usage. The externalized app also demonstrates
+  continueAsNew to cap orchestration history size. Extends existing Terraform for 2
+  additional function apps + storage accounts. Pre-seeded large test blobs for load testing.
+
+requirements_summary: |
+  1. Two new Azure Durable Function apps (Node.js 20, v4 model) under apps/inline-payloads
+     and apps/externalized-payloads
+  2. New shared package (packages/shared-oom) with 3 activities modeled after the customer
+     pattern: dataEnricher, expressionResolver, dataTransformer
+  3. The inline-payloads app passes full payload data (200KB-1.6MB JSON) inline as activity
+     inputs and outputs through the Durable Task framework — reproducing the OOM anti-pattern
+  4. The externalized-payloads app stores intermediate payloads in Blob Storage and passes
+     only blob URIs as activity inputs/outputs — the recommended best practice
+  5. Custom telemetry emits process.memoryUsage() (heapUsed, heapTotal, rss) as custom
+     metrics after every activity execution, enabling visibility into memory pressure
+  6. The externalized-payloads app uses continueAsNew in a sub-orchestrator to batch items
+     and periodically reset orchestration history, preventing unbounded event accumulation
+  7. The inline-payloads app uses high concurrency defaults (40/40) to allow memory buildup;
+     the externalized-payloads app uses reduced concurrency limits (10 orchestrator, 5 activity)
+  8. Pre-seeded large JSON blobs (200KB-1.6MB range) in workload storage for realistic testing
+  9. Both apps share the same Application Insights instance with distinct cloud_RoleName
+  10. Extend existing Terraform to provision 2 additional function apps + storage accounts
+  11. New KQL queries for memory-focused analysis (heap usage trends, OOM correlation)
+  12. Update load test plan with thread groups targeting the new apps
+
+open_questions: []
+
+risk_assessment:
+  overall_risk_level: medium
+  critical_risks:
+    - scenario: Large inline payloads may not cause visible memory pressure on EP3 (14GB) with moderate load
+      likelihood: medium
+      impact: high
+      mitigation: |
+        Seed blobs at the upper end of the range (1-1.6MB) and run at concurrency 20-40 to
+        multiply heap consumption. Add configurable payload multiplier to inflate in activities.
+    - scenario: continueAsNew sub-orchestrator pattern adds complexity and may confuse demo audience
+      likelihood: low
+      impact: medium
+      mitigation: |
+        Keep the sub-orchestrator simple — process N items then continueAsNew. Document the
+        pattern clearly in the README and comparison methodology.
+    - scenario: Existing Terraform state may conflict when adding new resources
+      likelihood: low
+      impact: medium
+      mitigation: |
+        Use consistent naming conventions. New resources follow same pattern as existing ones.
+        Test with terraform plan before apply.
+    - scenario: Blob payload externalization adds latency that muddies the comparison
+      likelihood: medium
+      impact: low
+      mitigation: |
+        The point is showing stability vs instability, not raw speed. Document that the
+        externalized approach trades minimal latency for dramatically better memory behavior.
+  assumptions:
+    - User has the existing infrastructure deployed or can deploy alongside
+    - EP3 (14GB) is sufficient to show memory pressure with 40 concurrent activities processing 1MB+ payloads
+    - The existing shared Application Insights instance can handle telemetry from 4 apps
+    - Large blob seeding (seed-data-oom.sh) runs once before load testing
+  constraints:
+    - Must follow existing monorepo patterns (npm workspaces, shared packages)
+    - New apps must not interfere with existing baseline/tuned apps
+    - Maximum estimated files per task is 3, maximum lines changed per task is 500
+    - Both new apps must share identical core activity logic via packages/shared-oom
+
+implementation_specification:
+  code_structure: |
+    New shared package packages/shared-oom contains the 3 activity functions (dataEnricher,
+    expressionResolver, dataTransformer), two orchestrator variants (inline vs externalized),
+    telemetry helpers with memory tracking, and type definitions. Each new app (apps/inline-payloads,
+    apps/externalized-payloads) is a thin wrapper that imports from shared-oom and provides its
+    own host.json + local.settings.json. The inline orchestrator passes full data inline; the
+    externalized orchestrator wraps/unwraps payloads via blob storage. The externalized app also
+    includes a sub-orchestrator that uses continueAsNew for batch processing.
+  affected_areas:
+    - packages/shared-oom/ — new shared package with activities, orchestrators, telemetry
+    - apps/inline-payloads/ — new function app reproducing OOM anti-pattern
+    - apps/externalized-payloads/ — new function app demonstrating best practices
+    - infra/ — extend Terraform with 2 more function apps, 2 more storage accounts
+    - loadtest/ — seed script for large blobs, load test targeting new apps
+    - analytics/ — KQL queries for memory pressure analysis
+    - docs/ — updated README, comparison methodology, new scenario documentation
+    - package.json — register new workspaces
+  component_details:
+    - component: packages/shared-oom
+      responsibility: |
+        Contains 3 activity functions (dataEnricher, expressionResolver, dataTransformer),
+        two orchestrator variants, a blob payload manager (for externalization), telemetry
+        helpers with memory usage tracking, and shared type definitions.
+      interfaces:
+        - "dataEnricher(input): Promise<EnrichedData> — enriches raw data with additional fields"
+        - "expressionResolver(input): Promise<ResolvedData> — evaluates and resolves expression fields"
+        - "dataTransformer(input): Promise<TransformedData> — transforms data to output format"
+        - "inlineOrchestrator(context): Generator — passes full payloads inline"
+        - "externalizedOrchestrator(context): Generator — passes blob URIs, uses continueAsNew"
+        - "BlobPayloadManager.store(data): Promise<string> — stores payload, returns URI"
+        - "BlobPayloadManager.retrieve(uri): Promise<unknown> — retrieves payload from blob"
+        - "recordMemoryUsage(telemetry, activityName): void — emits heap metrics"
+    - component: apps/inline-payloads
+      responsibility: |
+        Function app with default concurrency (40/40). Registers orchestrator that passes full
+        data payloads inline through activity inputs/outputs. Demonstrates the OOM anti-pattern.
+      interfaces:
+        - "POST /api/orchestrators/{orchestratorName} — starts inline orchestration"
+    - component: apps/externalized-payloads
+      responsibility: |
+        Function app with reduced concurrency (10/5). Registers orchestrator that externalizes
+        payloads to blob storage. Includes sub-orchestrator with continueAsNew for batch processing.
+      interfaces:
+        - "POST /api/orchestrators/{orchestratorName} — starts externalized orchestration"
+  dependencies:
+    - component: apps/inline-payloads
+      relationship: imports activity logic and telemetry from packages/shared-oom
+    - component: apps/externalized-payloads
+      relationship: imports activity logic, blob payload manager, and telemetry from packages/shared-oom
+    - component: loadtest
+      relationship: targets HTTP endpoints from both new apps
+    - component: analytics
+      relationship: queries memory telemetry schema defined in packages/shared-oom
+  integration_points:
+    - Both new function apps → shared Application Insights instance
+    - Inline-payloads activities → inline-payloads Blob Storage (workload I/O)
+    - Externalized-payloads activities → externalized-payloads Blob Storage (workload + payload staging)
+    - Externalized-payloads → intermediate blob container for payload externalization
+    - Azure Load Testing → both new function app HTTP endpoints
+    - KQL memory queries → Application Insights / Log Analytics workspace
+
+task_relationships:
+  - task: T1
+    depends_on: []
+    provides_to: [T2, T3, T4]
+    interface: Type definitions, shared constants, package scaffolding for shared-oom
+    format: TypeScript package with types and config
+  - task: T2
+    depends_on: [T1]
+    provides_to: [T3, T4]
+    interface: |
+      Three activity functions (dataEnricher, expressionResolver, dataTransformer) and
+      BlobPayloadManager for blob externalization
+    format: TypeScript modules exported from packages/shared-oom
+  - task: T3
+    depends_on: [T1, T2]
+    provides_to: [T5, T6]
+    interface: |
+      Two orchestrator generators — inlineOrchestrator (full payloads inline) and
+      externalizedOrchestrator (blob URI references + continueAsNew sub-orchestrator)
+    format: TypeScript orchestrator modules
+  - task: T4
+    depends_on: [T1, T2]
+    provides_to: [T5, T6, T9]
+    interface: |
+      TelemetryHelper with memory usage recording (heapUsed, heapTotal, rss custom metrics),
+      instrumented wrappers for all 3 activities and both orchestrators
+    format: TypeScript telemetry modules
+  - task: T5
+    depends_on: [T3, T4]
+    provides_to: [T8]
+    interface: Deployable inline-payloads function app with high concurrency host.json
+    format: Azure Functions v4 app
+  - task: T6
+    depends_on: [T3, T4]
+    provides_to: [T8]
+    interface: Deployable externalized-payloads function app with reduced concurrency host.json
+    format: Azure Functions v4 app
+  - task: T7
+    depends_on: []
+    provides_to: [T8]
+    interface: Terraform resources for 2 additional function apps + storage accounts
+    format: Terraform HCL additions to existing config
+  - task: T8
+    depends_on: [T5, T6, T7]
+    provides_to: [T9]
+    interface: Seed script for large blobs, updated load test config
+    format: Shell script + JMeter/config updates
+  - task: T9
+    depends_on: [T4, T8]
+    provides_to: [T10]
+    interface: KQL queries for memory pressure analysis
+    format: .kql files
+  - task: T10
+    depends_on: [T5, T6, T7, T8, T9]
+    provides_to: [T11]
+    interface: Code review findings and corrections
+    format: Review report
+  - task: T11
+    depends_on: [T10]
+    provides_to: []
+    interface: Updated README, OOM scenario documentation, comparison methodology update
+    format: Markdown documentation
+
+tasks:
+  - id: T1
+    title: Scaffold packages/shared-oom package with types
+    description: |
+      Create the packages/shared-oom package with TypeScript configuration, package.json
+      (mirroring packages/shared structure), and type definitions for the new activity chain.
+      Types include: EnricherInput/Output, ResolverInput/Output, TransformerInput/Output,
+      OomOrchestratorInput/Output, BlobReference (uri, container, blobName, sizeBytes).
+      Also update the root package.json to register the new workspace.
+    execution_order: 1
+    agent: gem-implementer
+    priority: high
+    status: pending
+    depends_on: []
+    context_files:
+      - packages/shared/package.json: reference for package structure
+      - packages/shared/tsconfig.json: reference for TS config
+      - packages/shared/src/types.ts: reference for type patterns
+      - package.json: root workspace config to update
+    estimated_effort: small
+    estimated_files: 3
+    estimated_lines: 180
+    focus_area: packages/shared-oom
+    tech_stack:
+      - TypeScript 5.x
+      - Node.js 20
+    test_coverage: null
+    verification:
+      - npm install succeeds at root level with new workspace
+      - tsc --noEmit passes on packages/shared-oom
+    acceptance_criteria:
+      - packages/shared-oom/package.json exists with correct name and dependencies
+      - packages/shared-oom/tsconfig.json configured with correct paths
+      - Type definitions cover all 3 activities (input/output) plus orchestrator types
+      - BlobReference type defined for payload externalization
+      - Root package.json includes packages/shared-oom in workspaces
+    failure_modes:
+      - scenario: Package naming conflicts with existing shared package
+        likelihood: low
+        impact: medium
+        mitigation: Use @df-comparison/shared-oom as the package name (matching @df-comparison/shared pattern)
+    requires_review: false
+    review_depth: null
+    security_sensitive: false
+
+  - id: T2
+    title: Implement 3 activity functions and BlobPayloadManager
+    description: |
+      Implement the core activity functions in packages/shared-oom/src/activities/:
+      1. dataEnricher — reads input data, adds enrichment fields (timestamps, computed fields,
+         cross-references), increasing payload size by ~50%. Accepts either inline data or blob URI.
+      2. expressionResolver — iterates over expression fields in the data, resolves/evaluates them,
+         produces resolved output. Payload size stays roughly the same or grows slightly.
+      3. dataTransformer — transforms data to final output format, re-serializes as JSON.
+
+      Also implement BlobPayloadManager in packages/shared-oom/src/blobPayloadManager.ts:
+      - store(data, containerClient, instanceId): serializes to JSON, uploads to blob, returns BlobReference
+      - retrieve(ref, containerClient): downloads blob, deserializes, returns data
+      Used by the externalized orchestrator to wrap/unwrap payloads between activities.
+    execution_order: 2
+    agent: gem-implementer
+    priority: high
+    status: pending
+    depends_on: [T1]
+    context_files:
+      - packages/shared/src/activities/: reference for activity patterns
+      - packages/shared/src/blobClient.ts: reference for blob client patterns
+      - packages/shared-oom/src/types.ts: type definitions from T1
+    estimated_effort: medium
+    estimated_files: 3
+    estimated_lines: 350
+    focus_area: packages/shared-oom/src/activities
+    tech_stack:
+      - TypeScript 5.x
+      - "@azure/storage-blob"
+      - "@azure/functions"
+    test_coverage: null
+    verification:
+      - tsc --noEmit passes
+      - Activities accept typed inputs and return typed outputs
+      - BlobPayloadManager store/retrieve round-trips data correctly
+    acceptance_criteria:
+      - dataEnricher enriches input data and increases payload size
+      - expressionResolver processes expression fields in the data
+      - dataTransformer transforms data to output format
+      - BlobPayloadManager.store() uploads JSON to blob and returns BlobReference
+      - BlobPayloadManager.retrieve() downloads and deserializes blob data
+      - All activities accept both inline data and blob URI reference inputs
+    failure_modes:
+      - scenario: Blob operations fail due to missing container
+        likelihood: medium
+        impact: medium
+        mitigation: BlobPayloadManager creates container if not exists on first store()
+
+  - id: T3
+    title: Implement inline and externalized orchestrators
+    description: |
+      Implement two orchestrator variants in packages/shared-oom/src/orchestrator/:
+
+      1. inlineOrchestrator — chains dataEnricher → expressionResolver → dataTransformer,
+         passing full payload data inline as activity inputs/outputs. This is the anti-pattern
+         that causes OOM under load. Each activity receives the full data object, processes it,
+         and returns the full result inline. With 200KB-1.6MB payloads, each orchestration holds
+         3x the payload in its history for replay.
+
+      2. externalizedOrchestrator — same 3-activity chain but wraps payloads:
+         - Before calling each activity, stores input payload in blob via BlobPayloadManager
+         - Passes only the BlobReference (URI + metadata, ~200 bytes) as the activity input
+         - Activity retrieves payload from blob, processes, stores result back to blob
+         - Returns BlobReference as output
+         - Includes a sub-orchestrator pattern with continueAsNew that processes items in batches
+           (e.g., 10 items per batch), then calls continueAsNew to reset history
+
+      Both orchestrators implement the same business logic; only the data-passing pattern differs.
+    execution_order: 3
+    agent: gem-implementer
+    priority: high
+    status: pending
+    depends_on: [T1, T2]
+    context_files:
+      - packages/shared/src/orchestrator/blobProcessingOrchestrator.ts: reference for orchestrator pattern
+      - packages/shared-oom/src/activities/: activities from T2
+      - packages/shared-oom/src/blobPayloadManager.ts: BlobPayloadManager from T2
+    estimated_effort: medium
+    estimated_files: 3
+    estimated_lines: 300
+    focus_area: packages/shared-oom/src/orchestrator
+    tech_stack:
+      - TypeScript 5.x
+      - durable-functions SDK
+    test_coverage: null
+    verification:
+      - tsc --noEmit passes
+      - Inline orchestrator passes full payloads as activity inputs/outputs
+      - Externalized orchestrator passes only BlobReference objects as activity inputs/outputs
+      - continueAsNew sub-orchestrator resets history after processing batch
+    acceptance_criteria:
+      - inlineOrchestrator chains 3 activities with full data inline
+      - externalizedOrchestrator chains 3 activities with blob URI references only
+      - externalizedOrchestrator includes sub-orchestrator with continueAsNew for batched processing
+      - Both orchestrators produce equivalent final results
+      - Orchestration history size dramatically differs between the two approaches
+    failure_modes:
+      - scenario: continueAsNew loses state between iterations
+        likelihood: medium
+        impact: high
+        mitigation: |
+          Pass continuation token and processed count as input to continueAsNew.
+          Track batch progress in the orchestrator input, not in local variables.
+
+  - id: T4
+    title: Add telemetry with memory usage tracking
+    description: |
+      Implement telemetry instrumentation in packages/shared-oom/src/telemetry/ that replicates
+      ALL existing telemetry patterns from packages/shared/src/telemetry/ and adds memory-specific
+      tracking. The new telemetry module must be a superset of the existing one.
+
+      Setup (packages/shared-oom/src/telemetry/setup.ts):
+      - initializeTelemetry() function matching packages/shared pattern exactly:
+        - Sets process.env.OTEL_SERVICE_NAME and OTEL_RESOURCE_ATTRIBUTES (cloud.role.name)
+        - Calls useAzureMonitor() from applicationinsights SDK with:
+          - connectionString from config
+          - samplingRatio: 1 (100% — no sampling)
+          - tracesPerSecond: 0 (disable RateLimitedSampler)
+        - Idempotent (safe to call multiple times, subsequent calls are no-ops)
+      - TelemetrySetupConfig accepts appName: "inline-payloads" | "externalized-payloads"
+
+      TelemetryHelper class (packages/shared-oom/src/telemetry/telemetryHelper.ts):
+      Must include ALL 6 existing instruments from packages/shared plus new memory/payload ones:
+
+      Existing instruments (MUST replicate):
+      - df.activity.duration — Histogram (ms) — activity execution duration
+      - df.activity.queue_delay — Histogram (ms) — time between scheduled and started
+      - df.orchestration.duration — Histogram (ms) — total orchestration duration
+      - df.activity.completed — Counter — completed activity executions
+      - df.orchestration.completed — Counter — completed orchestrations
+      - df.orchestration.failed — Counter — failed orchestrations
+
+      Existing methods (MUST replicate):
+      - createActivitySpan(activityName, instanceId) — span with df.app_name, df.activity_name,
+        df.orchestration_instance_id, df.function_type, cloud.role_name attributes
+      - recordActivityCompletion(span, activityName, durationMs, additionalAttributes)
+      - recordActivityFailure(span, activityName, error)
+      - recordQueueDelay(activityName, scheduledTime, startTime)
+      - createOrchestrationSpan(orchestrationName, instanceId)
+      - recordOrchestrationCompletion(span, durationMs, activitiesCompleted)
+      - recordOrchestrationFailure(span, error)
+
+      NEW memory instruments (additions for OOM scenario):
+      - df.memory.heap_used_mb — Histogram — heapUsed from process.memoryUsage()
+      - df.memory.heap_total_mb — Histogram — heapTotal from process.memoryUsage()
+      - df.memory.rss_mb — Histogram — rss from process.memoryUsage()
+      - df.memory.external_mb — Histogram — external from process.memoryUsage()
+
+      NEW payload instruments:
+      - df.payload.input_bytes — Histogram — size of activity input in bytes
+      - df.payload.output_bytes — Histogram — size of activity output in bytes
+      Dimension: df.payload_is_externalized ("true" | "false")
+
+      NEW method:
+      - recordMemoryAndPayload(activityName, inputSizeBytes, outputSizeBytes, isExternalized)
+        Records process.memoryUsage() and payload sizes after each activity execution
+
+      Factory: createTelemetryHelper(appName: "inline-payloads" | "externalized-payloads")
+
+      Instrumented wrappers (packages/shared-oom/src/telemetry/instrumentedActivities.ts):
+      - instrumentedDataEnricher, instrumentedExpressionResolver, instrumentedDataTransformer
+      - Each wrapper must: create activity span, record queue delay from _scheduledTimeUtc,
+        call the raw activity, record completion with duration, record memory and payload sizes,
+        handle failures with recordActivityFailure
+      - Pattern must match packages/shared/src/telemetry/instrumentedActivities.ts exactly
+
+      Instrumented orchestrators (packages/shared-oom/src/telemetry/instrumentedOrchestrator.ts):
+      - createInstrumentedInlineOrchestrator(telemetry) — wraps inline orchestrator
+      - createInstrumentedExternalizedOrchestrator(telemetry) — wraps externalized orchestrator
+      - Both must use context.df.isReplaying guard to prevent duplicate spans/metrics
+      - Pattern must match packages/shared/src/telemetry/instrumentedOrchestrator.ts
+
+      Index barrel (packages/shared-oom/src/telemetry/index.ts):
+      - Export all: TelemetryHelper, createTelemetryHelper, initializeTelemetry,
+        all instrumented wrappers, type exports
+    execution_order: 3
+    agent: gem-implementer
+    priority: high
+    status: pending
+    depends_on: [T1, T2]
+    context_files:
+      - packages/shared/src/telemetry/setup.ts: MUST replicate initializeTelemetry pattern (useAzureMonitor, samplingRatio, tracesPerSecond)
+      - packages/shared/src/telemetry/telemetryHelper.ts: MUST replicate all 6 instruments + all methods
+      - packages/shared/src/telemetry/instrumentedActivities.ts: MUST replicate wrapper pattern (span, queue delay, completion, failure)
+      - packages/shared/src/telemetry/instrumentedOrchestrator.ts: MUST replicate isReplaying guard pattern
+      - packages/shared/src/telemetry/index.ts: MUST replicate barrel export pattern
+    estimated_effort: medium
+    estimated_files: 3
+    estimated_lines: 500
+    focus_area: packages/shared-oom/src/telemetry
+    tech_stack:
+      - TypeScript 5.x
+      - "@opentelemetry/api"
+      - applicationinsights (v3 — useAzureMonitor)
+    test_coverage: null
+    verification:
+      - tsc --noEmit passes
+      - initializeTelemetry sets OTEL_SERVICE_NAME and calls useAzureMonitor with samplingRatio 1 and tracesPerSecond 0
+      - All 6 existing metric instruments are created (3 histograms + 3 counters)
+      - All 6 new metric instruments are created (4 memory histograms + 2 payload histograms)
+      - Activity spans include all existing attributes (df.app_name, df.activity_name, df.orchestration_instance_id, df.function_type, cloud.role_name)
+      - Memory metrics are emitted after each activity execution
+      - Payload size metrics track inline vs externalized accurately
+      - cloud_RoleName correctly identifies which app emitted each trace
+      - Orchestrator wrappers use isReplaying guard
+      - Barrel index exports all public symbols
+    acceptance_criteria:
+      - initializeTelemetry() replicates exact setup from packages/shared (useAzureMonitor, OTEL env vars, idempotent)
+      - TelemetryHelper includes all 6 existing instruments (df.activity.duration, df.activity.queue_delay, df.orchestration.duration, df.activity.completed, df.orchestration.completed, df.orchestration.failed)
+      - TelemetryHelper includes all 6 new instruments (df.memory.heap_used_mb/heap_total_mb/rss_mb/external_mb, df.payload.input_bytes/output_bytes)
+      - All existing methods replicated (createActivitySpan, recordActivityCompletion, recordActivityFailure, recordQueueDelay, createOrchestrationSpan, recordOrchestrationCompletion, recordOrchestrationFailure)
+      - recordMemoryAndPayload method records process.memoryUsage() and payload sizes
+      - Instrumented wrappers for all 3 activities follow same pattern as instrumentedActivities.ts
+      - Instrumented orchestrator wrappers use isReplaying guard matching instrumentedOrchestrator.ts
+      - createTelemetryHelper factory typed to "inline-payloads" | "externalized-payloads"
+      - Barrel index exports match packages/shared/src/telemetry/index.ts pattern
+    failure_modes:
+      - scenario: Memory metrics distorted by garbage collection timing
+        likelihood: medium
+        impact: low
+        mitigation: Record metrics immediately after activity completes, document that GC may affect readings
+      - scenario: Missing an existing instrument causes KQL queries to return no data for new apps
+        likelihood: medium
+        impact: high
+        mitigation: Cross-reference every instrument and method from telemetryHelper.ts — the description above enumerates all 6 existing ones explicitly
+
+  - id: T5
+    title: Create apps/inline-payloads function app
+    description: |
+      Create the inline-payloads function app under apps/inline-payloads/ following the same
+      structure as apps/baseline/. This app demonstrates the OOM anti-pattern:
+
+      - host.json with default/high concurrency settings:
+        maxConcurrentActivityFunctions: 40 (default, deliberately high)
+        maxConcurrentOrchestratorFunctions: 40 (default, deliberately high)
+        controlQueueBufferThreshold: 256 (default, deliberately high)
+      - src/index.ts MUST follow the same startup pattern as apps/baseline/src/index.ts:
+        1. Import initializeTelemetry, createTelemetryHelper, and all instrumented wrappers
+           from @df-comparison/shared-oom
+        2. Set APP_NAME = "inline-payloads"
+        3. Call initializeTelemetry({ connectionString, appName: APP_NAME }) at module top level
+           BEFORE any function registrations (reads APPLICATIONINSIGHTS_CONNECTION_STRING env var)
+        4. Create telemetry = createTelemetryHelper(APP_NAME)
+        5. Register orchestrator via df.app.orchestration() using createInstrumentedInlineOrchestrator(telemetry)
+        6. Register all 3 activities via df.app.activity() using instrumented wrappers with telemetry
+        7. Register HTTP starter function at POST /api/orchestrators/{orchestratorName}
+      - local.settings.json.example with required env vars (APPLICATIONINSIGHTS_CONNECTION_STRING,
+        AzureWebJobsStorage__accountName, BLOB_STORAGE_ACCOUNT_NAME, etc.)
+      - package.json with dependency on @df-comparison/shared-oom
+    execution_order: 4
+    agent: gem-implementer
+    priority: high
+    status: pending
+    depends_on: [T3, T4]
+    context_files:
+      - apps/baseline/: reference for app structure
+      - apps/baseline/src/index.ts: reference for function registration
+      - apps/baseline/host.json: reference for default host.json
+      - packages/shared-oom/: shared-oom exports
+    estimated_effort: small
+    estimated_files: 3
+    estimated_lines: 200
+    focus_area: apps/inline-payloads
+    tech_stack:
+      - TypeScript 5.x
+      - "@azure/functions"
+      - durable-functions
+      - "@df-comparison/shared-oom"
+    test_coverage: null
+    verification:
+      - npm install succeeds
+      - tsc --noEmit passes
+      - host.json has high concurrency defaults
+      - Function registrations import from shared-oom correctly
+    acceptance_criteria:
+      - App structure matches existing apps (host.json, package.json, tsconfig.json, src/index.ts)
+      - host.json uses high concurrency settings (40/40, high buffer threshold)
+      - initializeTelemetry() called at module top level before function registrations
+      - createTelemetryHelper("inline-payloads") creates telemetry instance
+      - Orchestrator registered via createInstrumentedInlineOrchestrator(telemetry)
+      - All 3 activities registered with instrumented wrappers passing telemetry
+      - APP_NAME = "inline-payloads" used for cloud.role_name differentiation
+      - HTTP starter function at /api/orchestrators/{orchestratorName}
+      - host.json logging.applicationInsights.samplingSettings matches existing apps (excludedTypes: "Request;Dependency")
+    failure_modes:
+      - scenario: Shared-oom package not found during npm install
+        likelihood: low
+        impact: high
+        mitigation: Ensure T1 package.json has correct name and root workspaces config is updated
+
+  - id: T6
+    title: Create apps/externalized-payloads function app
+    description: |
+      Create the externalized-payloads function app under apps/externalized-payloads/ following
+      the same structure as apps/tuned/. This app demonstrates the best-practice pattern:
+
+      - host.json with reduced concurrency settings:
+        maxConcurrentActivityFunctions: 5
+        maxConcurrentOrchestratorFunctions: 10
+        controlQueueBufferThreshold: 32
+        controlQueueBatchSize: 8
+      - src/index.ts MUST follow the same startup pattern as apps/tuned/src/index.ts:
+        1. Import initializeTelemetry, createTelemetryHelper, and all instrumented wrappers
+           from @df-comparison/shared-oom
+        2. Set APP_NAME = "externalized-payloads"
+        3. Call initializeTelemetry({ connectionString, appName: APP_NAME }) at module top level
+           BEFORE any function registrations (reads APPLICATIONINSIGHTS_CONNECTION_STRING env var)
+        4. Create telemetry = createTelemetryHelper(APP_NAME)
+        5. Register orchestrator via df.app.orchestration() using createInstrumentedExternalizedOrchestrator(telemetry)
+        6. Register sub-orchestrator for continueAsNew batching
+        7. Register all 3 activities via df.app.activity() using instrumented wrappers with telemetry
+        8. Register HTTP starter function at POST /api/orchestrators/{orchestratorName}
+      - local.settings.json.example with required env vars (APPLICATIONINSIGHTS_CONNECTION_STRING,
+        AzureWebJobsStorage__accountName, BLOB_STORAGE_ACCOUNT_NAME,
+        INTERMEDIATE_PAYLOAD_CONTAINER, etc.)
+      - package.json with dependency on @df-comparison/shared-oom
+    execution_order: 4
+    agent: gem-implementer
+    priority: high
+    status: pending
+    depends_on: [T3, T4]
+    context_files:
+      - apps/tuned/: reference for app structure
+      - apps/tuned/src/index.ts: reference for function registration
+      - apps/tuned/host.json: reference for tuned host.json
+      - packages/shared-oom/: shared-oom exports
+    estimated_effort: small
+    estimated_files: 3
+    estimated_lines: 220
+    focus_area: apps/externalized-payloads
+    tech_stack:
+      - TypeScript 5.x
+      - "@azure/functions"
+      - durable-functions
+      - "@df-comparison/shared-oom"
+    test_coverage: null
+    verification:
+      - npm install succeeds
+      - tsc --noEmit passes
+      - host.json has reduced concurrency settings
+      - Function registrations import externalized orchestrator from shared-oom
+    acceptance_criteria:
+      - App structure matches existing apps
+      - host.json uses reduced concurrency (5 activities, 10 orchestrators, 32 buffer threshold, 8 batch size)
+      - initializeTelemetry() called at module top level before function registrations
+      - createTelemetryHelper("externalized-payloads") creates telemetry instance
+      - Orchestrator registered via createInstrumentedExternalizedOrchestrator(telemetry)
+      - Sub-orchestrator registered for continueAsNew batching
+      - All 3 activities registered with instrumented wrappers passing telemetry
+      - APP_NAME = "externalized-payloads" used for cloud.role_name differentiation
+      - HTTP starter function at /api/orchestrators/{orchestratorName}
+      - host.json logging.applicationInsights.samplingSettings matches existing apps (excludedTypes: "Request;Dependency")
+    failure_modes:
+      - scenario: Sub-orchestrator registration missed causing runtime failure
+        likelihood: medium
+        impact: high
+        mitigation: Verify both orchestrator and sub-orchestrator are registered in index.ts
+
+  - id: T7
+    title: Extend Terraform for new apps and storage
+    description: |
+      Add Terraform resources to infra/ for the two new function apps, matching ALL existing
+      security and networking patterns. This is a security-sensitive task — every resource must
+      replicate the existing posture exactly.
+
+      Storage accounts (4 new):
+      1. inline-payloads task hub storage
+      2. externalized-payloads task hub storage
+      3. inline-payloads workload blob storage
+      4. externalized-payloads workload blob storage
+      All storage accounts must have: shared_access_key_enabled = false,
+      public_network_access_enabled = false, min_tls_version = "TLS1_2",
+      default_to_oauth_authentication = true, allow_nested_items_to_be_public = false.
+
+      Blob containers:
+      - input + output on both workload storage accounts
+      - intermediate-payloads container on externalized-payloads workload storage
+        (used by BlobPayloadManager to stage externalized payloads between activities)
+
+      Managed identities (2 new user-assigned):
+      - id-{prefix}-inline for inline-payloads app
+      - id-{prefix}-externalized for externalized-payloads app
+
+      RBAC role assignments (per identity, matching existing pattern):
+      - Task hub storage: Storage Blob Data Owner, Storage Queue Data Contributor,
+        Storage Table Data Contributor
+      - Workload blob storage: Storage Blob Data Contributor
+      - Add both new identities to time_sleep.rbac_propagation depends_on
+
+      Private networking:
+      - 2 new delegated subnets (10.0.4.0/24 snet-inline, 10.0.5.0/24 snet-externalized)
+        with Microsoft.Web/serverFarms delegation
+      - Add new storage accounts to local.storage_private_endpoints map in network.tf:
+        blob + queue + table PEs for both task hub accounts,
+        blob PEs for both workload blob accounts
+      - All PEs in existing snet-pe subnet with private DNS zone groups
+
+      Function apps (2 new Linux Function Apps):
+      Both must have: storage_uses_managed_identity = true, content_share_force_disabled = true,
+      ftp_publish_basic_authentication_enabled = false,
+      webdeploy_publish_basic_authentication_enabled = false,
+      virtual_network_subnet_id pointing to respective subnet,
+      UserAssigned identity, key_vault_reference_identity_id,
+      vnet_route_all_enabled = true, AzureWebJobsStorage__credential = "managedidentity",
+      AzureWebJobsStorage__clientId, AZURE_CLIENT_ID.
+      - inline-payloads: APP_NAME = "inline-payloads", no special memory settings
+      - externalized-payloads: APP_NAME = "externalized-payloads",
+        INTERMEDIATE_PAYLOAD_CONTAINER = "intermediate-payloads"
+      Both depend on time_sleep.rbac_propagation and azurerm_private_endpoint.storage.
+
+      App Service plans (2 new P0v3):
+      - plan-{prefix}-inline
+      - plan-{prefix}-externalized
+
+      Outputs: function app URLs, storage account names for new apps.
+    execution_order: 3
+    agent: gem-implementer
+    priority: high
+    status: pending
+    depends_on: []
+    context_files:
+      - infra/main.tf: existing resource patterns — copy storage, identity, RBAC, function app blocks
+      - infra/variables.tf: existing variables
+      - infra/outputs.tf: existing outputs to extend
+      - infra/network.tf: existing VNet, subnets, private endpoints, DNS zones to extend
+    estimated_effort: large
+    estimated_files: 3
+    estimated_lines: 500
+    focus_area: infra
+    tech_stack:
+      - Terraform >= 1.5
+      - azurerm provider
+    test_coverage: null
+    verification:
+      - terraform validate succeeds
+      - terraform plan shows expected new resources
+      - No conflicts with existing resource names
+      - All new storage accounts have shared_access_key_enabled = false and public_network_access_enabled = false
+      - All new function apps have storage_uses_managed_identity = true and VNet integration
+      - Private endpoints created for all new storage accounts
+      - RBAC role assignments cover blob, queue, and table for task hub storage
+    acceptance_criteria:
+      - 4 new storage accounts with identical security settings to existing (no shared keys, no public access, TLS 1.2, OAuth default)
+      - 2 new user-assigned managed identities with correct RBAC role assignments
+      - RBAC: Blob Data Owner + Queue Data Contributor + Table Data Contributor on task hub storage, Blob Data Contributor on workload storage
+      - 2 new delegated subnets (10.0.4.0/24, 10.0.5.0/24) with Microsoft.Web delegation
+      - Private endpoints for all new storage accounts (blob/queue/table for task hubs, blob for workload) in snet-pe
+      - Private DNS zone group registration for all new PEs using existing DNS zones
+      - 2 new P0v3 App Service plans
+      - 2 new Linux Function Apps with managed identity auth, VNet integration, vnet_route_all, no FTP/WebDeploy basic auth
+      - intermediate-payloads blob container on externalized-payloads workload storage
+      - Both function apps depend on rbac_propagation and private_endpoint resources
+      - New outputs for function app URLs and storage account names
+    failure_modes:
+      - scenario: Storage account name exceeds 24-character limit
+        likelihood: medium
+        impact: high
+        mitigation: Use shorter suffixes (e.g., "iltask", "extask", "ilblob", "exblob") and verify name lengths
+      - scenario: /24 subnet exhaustion in 10.0.0.0/16 address space
+        likelihood: low
+        impact: medium
+        mitigation: Current subnets use 10.0.0.0-10.0.3.0; new subnets at 10.0.4.0 and 10.0.5.0 are safe
+      - scenario: Private endpoint limit reached in snet-pe subnet
+        likelihood: low
+        impact: high
+        mitigation: /24 supports 251 usable IPs; existing PEs use ~11, new PEs add ~8 — well within limit
+    requires_review: true
+    review_depth: full
+    security_sensitive: true
+
+  - id: T8
+    title: Create seed script and update load test config
+    description: |
+      1. Create loadtest/seed-data-oom.sh that generates and uploads large JSON blobs (200KB,
+         500KB, 1MB, 1.6MB sizes) to both the inline-payloads and externalized-payloads
+         workload blob storage containers. Blobs should contain realistic JSON structures
+         with nested objects, arrays, and string fields to simulate customer data.
+
+      2. Update loadtest/loadtest.config.yaml to include thread groups for the new apps.
+
+      3. Add or update loadtest/loadtest.jmx with HTTP samplers targeting the new app endpoints
+         with configurable concurrency to trigger the OOM pressure scenario.
+    execution_order: 5
+    agent: gem-implementer
+    priority: medium
+    status: pending
+    depends_on: [T5, T6, T7]
+    context_files:
+      - loadtest/seed-data.sh: existing seed script pattern
+      - loadtest/loadtest.config.yaml: existing load test config
+      - loadtest/loadtest.jmx: existing JMeter plan
+    estimated_effort: small
+    estimated_files: 3
+    estimated_lines: 200
+    focus_area: loadtest
+    tech_stack:
+      - bash
+      - az CLI
+      - JMeter
+    test_coverage: null
+    verification:
+      - seed-data-oom.sh creates blobs of expected sizes
+      - Load test config references new app endpoints
+    acceptance_criteria:
+      - Seed script creates 200KB, 500KB, 1MB, 1.6MB JSON blobs in both storage accounts
+      - Blobs contain realistic nested JSON structures
+      - Load test config includes thread groups for both new apps
+      - JMeter plan has HTTP samplers for the new endpoints
+    failure_modes:
+      - scenario: az CLI auth fails during blob upload
+        likelihood: low
+        impact: low
+        mitigation: Document that user must be logged in with az login before running seed script
+
+  - id: T9
+    title: Add memory-focused KQL queries
+    description: |
+      Create new KQL queries in analytics/queries/ for analyzing the OOM payload scenario:
+
+      1. heap_memory_trend.kql — Track df.heap_used_mb, df.heap_total_mb, df.rss_mb over time,
+         faceted by cloud_RoleName (inline-payloads vs externalized-payloads)
+      2. payload_size_distribution.kql — Distribution of df.input_payload_bytes and
+         df.output_payload_bytes by activity name and app
+      3. memory_vs_concurrency.kql — Correlate heap usage with number of concurrent
+         orchestrations/activities running at each point in time
+    execution_order: 6
+    agent: gem-implementer
+    priority: medium
+    status: pending
+    depends_on: [T4, T8]
+    context_files:
+      - analytics/queries/: existing KQL query patterns
+      - docs/telemetry-schema.md: existing telemetry schema
+    estimated_effort: small
+    estimated_files: 3
+    estimated_lines: 120
+    focus_area: analytics/queries
+    tech_stack:
+      - KQL (Kusto Query Language)
+    test_coverage: null
+    verification:
+      - Queries parse correctly in Log Analytics
+      - Queries use correct custom metric names from T4 telemetry
+    acceptance_criteria:
+      - heap_memory_trend.kql shows memory over time per app
+      - payload_size_distribution.kql shows payload sizes per activity
+      - memory_vs_concurrency.kql correlates memory with concurrent execution count
+      - All queries use cloud_RoleName to distinguish inline vs externalized apps
+    failure_modes:
+      - scenario: Custom metric names don't match telemetry implementation
+        likelihood: medium
+        impact: low
+        mitigation: Cross-reference metric names with T4 telemetry implementation
+
+  - id: T10
+    title: Code review of all new components
+    description: |
+      Review all new code from T1-T9 for:
+      - Correct implementation of inline vs externalized payload patterns
+      - Memory telemetry accuracy and completeness
+      - continueAsNew sub-orchestrator correctness (state preservation across iterations)
+      - Terraform security settings consistency with existing resources
+      - Type safety and error handling
+      - Consistent coding patterns with existing codebase
+    execution_order: 7
+    agent: gem-reviewer
+    priority: high
+    status: pending
+    depends_on: [T5, T6, T7, T8, T9]
+    context_files:
+      - packages/shared-oom/: all new shared code
+      - apps/inline-payloads/: inline app
+      - apps/externalized-payloads/: externalized app
+      - infra/main.tf: Terraform additions
+    estimated_effort: medium
+    estimated_files: 3
+    estimated_lines: 0
+    focus_area: null
+    requires_review: true
+    review_depth: full
+    security_sensitive: true
+    verification:
+      - All TypeScript compiles without errors
+      - Terraform validates successfully
+      - No security issues in storage account or function app configuration
+    acceptance_criteria:
+      - Inline orchestrator genuinely passes full payload inline (not accidentally externalized)
+      - Externalized orchestrator only passes BlobReference objects through orchestration history
+      - continueAsNew correctly preserves batch progress state
+      - Memory telemetry records accurate values
+      - Terraform resources follow security best practices
+    failure_modes:
+      - scenario: Subtle bug in continueAsNew state management causes data loss
+        likelihood: medium
+        impact: high
+        mitigation: Verify continuation input includes all necessary state for the next iteration
+
+  - id: T11
+    title: Update documentation for OOM scenario
+    description: |
+      Update project documentation to cover the new OOM payload scenario:
+
+      1. Update README.md:
+         - Add new Architecture section showing the 4-app setup
+         - Add "Key Differences: Inline vs Externalized" table
+         - Add quick start commands for new apps
+         - Update project structure section
+
+      2. Create docs/oom-payload-scenario.md:
+         - Problem description (customer OOM scenario summary)
+         - What the inline-payloads app demonstrates (anti-pattern)
+         - What the externalized-payloads app demonstrates (best practices)
+         - How to interpret the memory telemetry
+         - How to use continueAsNew for long-running orchestrations
+
+      3. Update docs/comparison-methodology.md:
+         - Add section on memory-focused comparison
+         - Reference new KQL queries
+    execution_order: 8
+    agent: gem-documentation-writer
+    priority: medium
+    status: pending
+    depends_on: [T10]
+    context_files:
+      - README.md: existing README to update
+      - docs/comparison-methodology.md: existing methodology doc
+      - docs/telemetry-schema.md: reference for telemetry docs
+    estimated_effort: medium
+    estimated_files: 3
+    estimated_lines: 400
+    focus_area: docs
+    task_type: update
+    audience: developers
+    coverage_matrix:
+      - README with 4-app architecture diagram
+      - OOM scenario documentation with problem/solution narrative
+      - Memory comparison methodology
+    verification:
+      - README accurately reflects new project structure
+      - OOM scenario doc covers all key concepts from the support conversation
+      - No broken internal links
+    acceptance_criteria:
+      - README includes architecture diagram with all 4 apps
+      - Key differences table for inline vs externalized is clear and accurate
+      - OOM scenario doc explains the anti-pattern, best practice, and how to interpret results
+      - Comparison methodology includes memory analysis guidance
+    failure_modes:
+      - scenario: Documentation references incorrect metric names
+        likelihood: low
+        impact: low
+        mitigation: Cross-reference with telemetry schema and KQL queries

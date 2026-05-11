@@ -1,0 +1,29 @@
+// Memory vs Concurrency — Correlate heap usage with concurrent execution count
+// Shows how memory scales with active orchestrations/activities per app
+let memory_data = customMetrics
+| where name == "df.memory.heap_used_mb"
+| where cloud_RoleName in ("inline-payloads", "externalized-payloads")
+| summarize avg_heap_mb = avg(value), max_heap_mb = max(value)
+    by bin(timestamp, 30s), cloud_RoleName;
+let activity_concurrency = customMetrics
+| where name == "df.activity.completed"
+| where cloud_RoleName in ("inline-payloads", "externalized-payloads")
+| summarize active_activities = sum(value)
+    by bin(timestamp, 30s), cloud_RoleName;
+let orchestration_concurrency = customMetrics
+| where name == "df.orchestration.completed"
+| where cloud_RoleName in ("inline-payloads", "externalized-payloads")
+| summarize active_orchestrations = sum(value)
+    by bin(timestamp, 30s), cloud_RoleName;
+memory_data
+| join kind=leftouter activity_concurrency on timestamp, cloud_RoleName
+| join kind=leftouter orchestration_concurrency on timestamp, cloud_RoleName
+| project
+    timestamp,
+    cloud_RoleName,
+    avg_heap_mb = round(avg_heap_mb, 2),
+    max_heap_mb = round(max_heap_mb, 2),
+    active_activities = coalesce(active_activities, 0),
+    active_orchestrations = coalesce(active_orchestrations, 0),
+    total_concurrent = coalesce(active_activities, 0) + coalesce(active_orchestrations, 0)
+| order by timestamp asc, cloud_RoleName asc
